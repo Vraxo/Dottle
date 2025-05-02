@@ -1,0 +1,1833 @@
+<file path="App.cs">
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Styling;          // Required for RequestedThemeVariant, Application.Styles
+using Avalonia.Themes.Fluent;    // Required for FluentTheme
+using Dottle.ViewModels;
+using Dottle.Views;
+using Dottle.Services;
+// using System; // Check if needed - likely not directly
+
+namespace Dottle;
+
+public class App : Application
+{
+    private readonly EncryptionService _encryptionService;
+    private readonly JournalService _journalService;
+
+    public App()
+    {
+        _encryptionService = new EncryptionService();
+        _journalService = new JournalService(_encryptionService);
+    }
+
+    public override void OnFrameworkInitializationCompleted()
+    {
+        // Load the theme explicitly in C#
+        Styles.Add(new FluentTheme()); // Add FluentTheme instance
+
+        // Set the desired theme variant AFTER adding the theme
+        RequestedThemeVariant = ThemeVariant.Dark;
+
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            var loginViewModel = new LoginViewModel();
+            var loginView = new LoginView
+            {
+                DataContext = loginViewModel
+            };
+
+            var mainWindow = new Window
+            {
+                Title = "Dottle - Login",
+                Content = loginView,
+                Width = 400,
+                Height = 300,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                CanResize = false,
+                SystemDecorations = SystemDecorations.Full
+            };
+
+            loginViewModel.LoginSuccessful += (sender, password) =>
+            {
+                var mainViewModel = new MainViewModel(_journalService, password);
+                var mainView = new MainView
+                {
+                    DataContext = mainViewModel
+                };
+
+                mainWindow.Content = mainView;
+                mainWindow.Title = "Dottle Journal";
+                mainWindow.Width = 900;
+                mainWindow.Height = 650;
+                mainWindow.MinWidth = 600;
+                mainWindow.MinHeight = 400;
+                mainWindow.CanResize = true;
+                mainWindow.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            };
+
+            loginViewModel.LoginFailed += (sender, args) =>
+            {
+                // Optional feedback
+            };
+
+            desktop.MainWindow = mainWindow;
+        }
+
+        base.OnFrameworkInitializationCompleted();
+    }
+}
+</file>
+
+<file path="Program.cs">
+using Avalonia;
+using Avalonia.Reactive; // Although not explicitly using ReactiveUI features, it's often included by default templates
+using System;
+using System.Reflection.PortableExecutable;
+
+namespace Dottle;
+
+internal sealed class Program
+{
+    [STAThread]
+    public static void Main(string[] args) => BuildAvaloniaApp()
+    .StartWithClassicDesktopLifetime(args);
+
+    public static AppBuilder BuildAvaloniaApp()
+        => AppBuilder.Configure<App>()
+            .UsePlatformDetect()
+            .LogToTrace();
+    // Commented out UseReactiveUI() as it's not strictly needed for this approach
+    // .UseReactiveUI();
+}
+</file>
+
+<file path="ViewLocator.cs">
+using System;
+using Avalonia.Controls;
+using Avalonia.Controls.Templates;
+using Dottle.ViewModels;
+
+namespace Dottle
+{
+    public class ViewLocator : IDataTemplate
+    {
+
+        public Control? Build(object? param)
+        {
+            if (param is null)
+                return null;
+
+            var name = param.GetType().FullName!.Replace("ViewModel", "View", StringComparison.Ordinal);
+            var type = Type.GetType(name);
+
+            if (type != null)
+            {
+                return (Control)Activator.CreateInstance(type)!;
+            }
+
+            return new TextBlock { Text = "Not Found: " + name };
+        }
+
+        public bool Match(object? data)
+        {
+            return data is ViewModelBase;
+        }
+    }
+}
+</file>
+
+<file path="Models\JournalEntry.cs">
+using System;
+
+namespace Dottle.Models;
+
+public class JournalEntry
+{
+    public string FileName { get; }
+    public DateTime Date { get; }
+    public string DisplayName { get; } // e.g., "1404-02-10"
+
+    public JournalEntry(string fileName, DateTime date)
+    {
+        FileName = fileName;
+        Date = date;
+        // Assuming filename is already in YYYY-MM-DD.txt format
+        DisplayName = Path.GetFileNameWithoutExtension(fileName);
+    }
+}
+</file>
+
+<file path="Services\EncryptionService.cs">
+using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace Dottle.Services;
+
+public class EncryptionService
+{
+    private const int KeySize = 256; // AES key size in bits
+    private const int NonceSize = 12; // AES-GCM nonce size in bytes (96 bits)
+    private const int TagSize = 16; // AES-GCM auth tag size in bytes (128 bits)
+    private const int SaltSize = 16; // PBKDF2 salt size in bytes
+    private const int Iterations = 350000; // PBKDF2 iteration count
+    private static readonly HashAlgorithmName HashAlgorithm = HashAlgorithmName.SHA512;
+
+    public byte[] Encrypt(string plainText, string password)
+    {
+        byte[] salt = RandomNumberGenerator.GetBytes(SaltSize);
+        byte[] key = Rfc2898DeriveBytes.Pbkdf2(
+            Encoding.UTF8.GetBytes(password),
+            salt,
+            Iterations,
+            HashAlgorithm,
+            KeySize / 8);
+
+        byte[] nonce = RandomNumberGenerator.GetBytes(NonceSize);
+        byte[] plainBytes = Encoding.UTF8.GetBytes(plainText);
+        byte[] cipherText = new byte[plainBytes.Length];
+        byte[] tag = new byte[TagSize];
+
+        using var aesGcm = new AesGcm(key, TagSize);
+        aesGcm.Encrypt(nonce, plainBytes, cipherText, tag);
+
+        // Combine salt, nonce, tag, and ciphertext for storage
+        // Format: [Salt (16 bytes)][Nonce (12 bytes)][Tag (16 bytes)][Ciphertext (variable)]
+        byte[] encryptedData = new byte[SaltSize + NonceSize + TagSize + cipherText.Length];
+        Buffer.BlockCopy(salt, 0, encryptedData, 0, SaltSize);
+        Buffer.BlockCopy(nonce, 0, encryptedData, SaltSize, NonceSize);
+        Buffer.BlockCopy(tag, 0, encryptedData, SaltSize + NonceSize, TagSize);
+        Buffer.BlockCopy(cipherText, 0, encryptedData, SaltSize + NonceSize + TagSize, cipherText.Length);
+
+        // Securely clear sensitive byte arrays
+        Array.Clear(key, 0, key.Length);
+        Array.Clear(plainBytes, 0, plainBytes.Length);
+
+        return encryptedData;
+    }
+
+    public string? Decrypt(byte[] encryptedData, string password)
+    {
+        if (encryptedData == null || encryptedData.Length < SaltSize + NonceSize + TagSize)
+        {
+            // Data is too short to contain required parts
+            return null;
+        }
+
+        try
+        {
+            byte[] salt = new byte[SaltSize];
+            Buffer.BlockCopy(encryptedData, 0, salt, 0, SaltSize);
+
+            byte[] key = Rfc2898DeriveBytes.Pbkdf2(
+                Encoding.UTF8.GetBytes(password),
+                salt,
+                Iterations,
+                HashAlgorithm,
+                KeySize / 8);
+
+            byte[] nonce = new byte[NonceSize];
+            Buffer.BlockCopy(encryptedData, SaltSize, nonce, 0, NonceSize);
+
+            byte[] tag = new byte[TagSize];
+            Buffer.BlockCopy(encryptedData, SaltSize + NonceSize, tag, 0, TagSize);
+
+            int cipherTextLength = encryptedData.Length - SaltSize - NonceSize - TagSize;
+            byte[] cipherText = new byte[cipherTextLength];
+            Buffer.BlockCopy(encryptedData, SaltSize + NonceSize + TagSize, cipherText, 0, cipherTextLength);
+
+            byte[] plainBytes = new byte[cipherTextLength];
+
+            using var aesGcm = new AesGcm(key, TagSize);
+            aesGcm.Decrypt(nonce, cipherText, tag, plainBytes);
+
+            // Securely clear sensitive byte arrays
+            Array.Clear(key, 0, key.Length);
+            Array.Clear(cipherText, 0, cipherText.Length);
+
+            return Encoding.UTF8.GetString(plainBytes);
+        }
+        catch (CryptographicException)
+        {
+            // Decryption failed - likely wrong password or corrupted data
+            return null;
+        }
+        catch (Exception)
+        {
+            // Handle other potential exceptions during decryption
+            return null;
+        }
+    }
+}
+</file>
+
+<file path="Services\JournalService.cs">
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using Dottle.Models;
+using Dottle.Utils;
+
+namespace Dottle.Services;
+
+public class JournalService
+{
+    private readonly EncryptionService _encryptionService;
+    private readonly string _journalDirectory;
+
+    public JournalService(EncryptionService encryptionService)
+    {
+        _encryptionService = encryptionService;
+        // Determine base path (next to executable)
+        string? assemblyLocation = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        if (string.IsNullOrEmpty(assemblyLocation))
+        {
+            // Fallback or error handling if location cannot be determined
+            assemblyLocation = Environment.CurrentDirectory;
+        }
+        _journalDirectory = Path.Combine(assemblyLocation, "Journals");
+
+        // Ensure the directory exists
+        Directory.CreateDirectory(_journalDirectory);
+    }
+
+    public IEnumerable<JournalEntry> GetJournalEntries()
+    {
+        var journalEntries = new List<JournalEntry>();
+        var files = Directory.EnumerateFiles(_journalDirectory, "*.txt");
+
+        foreach (var file in files)
+        {
+            string fileName = Path.GetFileNameWithoutExtension(file);
+            if (PersianCalendarHelper.TryParsePersianDateString(fileName, out DateTime date))
+            {
+                journalEntries.Add(new JournalEntry(Path.GetFileName(file), date));
+            }
+        }
+
+        return journalEntries.OrderByDescending(je => je.Date);
+    }
+
+    public string? ReadJournalContent(string fileName, string password)
+    {
+        string filePath = Path.Combine(_journalDirectory, fileName);
+        if (!File.Exists(filePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            byte[] encryptedData = File.ReadAllBytes(filePath);
+            return _encryptionService.Decrypt(encryptedData, password);
+        }
+        catch (IOException)
+        {
+            // Handle file read errors
+            return null;
+        }
+        catch (Exception)
+        {
+            // Catch potential decryption or other errors
+            return null;
+        }
+    }
+
+    public bool SaveJournalContent(string fileName, string content, string password)
+    {
+        string filePath = Path.Combine(_journalDirectory, fileName);
+        try
+        {
+            byte[] encryptedData = _encryptionService.Encrypt(content, password);
+            File.WriteAllBytes(filePath, encryptedData);
+            return true;
+        }
+        catch (IOException)
+        {
+            // Handle file write errors
+            return false;
+        }
+        catch (Exception)
+        {
+            // Catch potential encryption or other errors
+            return false;
+        }
+    }
+
+    public string? CreateNewJournal(DateTime date, string password)
+    {
+        string dateString = PersianCalendarHelper.GetPersianDateString(date);
+        string fileName = $"{dateString}.txt";
+        string filePath = Path.Combine(_journalDirectory, fileName);
+
+        if (File.Exists(filePath))
+        {
+            // Journal for this date already exists
+            // Could return null or the existing filename
+            return null;
+        }
+
+        // Create an empty encrypted file
+        bool success = SaveJournalContent(fileName, string.Empty, password);
+
+        return success ? fileName : null;
+    }
+
+    public string GetJournalDirectoryPath()
+    {
+        return _journalDirectory;
+    }
+
+    /// <summary>
+    /// Changes the encryption password for all existing journal files.
+    /// Reads each journal, decrypts with the old password, and re-encrypts with the new password.
+    /// </summary>
+    /// <param name="oldPassword">The current password used for decryption.</param>
+    /// <param name="newPassword">The new password to use for encryption.</param>
+    /// <returns>True if all journals were successfully re-encrypted, false otherwise.</returns>
+    public bool ChangeEncryptionPassword(string oldPassword, string newPassword)
+    {
+        var files = Directory.EnumerateFiles(_journalDirectory, "*.txt");
+        bool allSucceeded = true;
+
+        foreach (var filePath in files)
+        {
+            string fileName = Path.GetFileName(filePath);
+            try
+            {
+                // 1. Read encrypted data
+                byte[] encryptedData = File.ReadAllBytes(filePath);
+
+                // 2. Decrypt with old password
+                string? plainText = _encryptionService.Decrypt(encryptedData, oldPassword);
+
+                if (plainText == null)
+                {
+                    // Decryption failed for this file - indicates wrong old password or corruption
+                    // Log this error? For now, we stop and report failure.
+                    System.Diagnostics.Debug.WriteLine($"Error: Failed to decrypt {fileName} with the provided old password.");
+                    allSucceeded = false;
+                    break; // Stop processing further files
+                }
+
+                // 3. Encrypt with new password
+                byte[] newEncryptedData = _encryptionService.Encrypt(plainText, newPassword);
+
+                // 4. Overwrite the file with newly encrypted data
+                File.WriteAllBytes(filePath, newEncryptedData);
+
+                System.Diagnostics.Debug.WriteLine($"Successfully re-encrypted {fileName}.");
+
+            }
+            catch (Exception ex)
+            {
+                // Catch any IO or other exceptions during the process for this file
+                System.Diagnostics.Debug.WriteLine($"Error processing file {fileName}: {ex.Message}");
+                allSucceeded = false;
+                break; // Stop processing further files on error
+            }
+        }
+
+        return allSucceeded;
+    }
+}
+</file>
+
+<file path="Utils\PersianCalendarHelper.cs">
+using System;
+using System.Globalization;
+using System.Text.RegularExpressions;
+
+namespace Dottle.Utils;
+
+public static partial class PersianCalendarHelper
+{
+    private static readonly PersianCalendar pc = new();
+    private static readonly Regex DateFormatRegex = DateRegex();
+
+    public static string GetCurrentPersianDateString()
+    {
+        var now = DateTime.Now;
+        return GetPersianDateString(now);
+    }
+
+    public static string GetPersianDateString(DateTime dt)
+    {
+        int year = pc.GetYear(dt);
+        int month = pc.GetMonth(dt);
+        int day = pc.GetDayOfMonth(dt);
+        return $"{year:D4}-{month:D2}-{day:D2}";
+    }
+
+    public static int GetPersianYear(DateTime dt)
+    {
+        return pc.GetYear(dt);
+    }
+
+    public static bool TryParsePersianDateString(string dateString, out DateTime result)
+    {
+        result = DateTime.MinValue;
+        var match = DateFormatRegex.Match(dateString);
+
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(match.Groups["year"].Value, out int year)) return false;
+        if (!int.TryParse(match.Groups["month"].Value, out int month)) return false;
+        if (!int.TryParse(match.Groups["day"].Value, out int day)) return false;
+
+        try
+        {
+            // Validate month and day ranges for the given Persian year
+            if (month < 1 || month > 12) return false;
+            int daysInMonth = pc.GetDaysInMonth(year, month);
+            if (day < 1 || day > daysInMonth) return false;
+
+            result = pc.ToDateTime(year, month, day, 0, 0, 0, 0);
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Invalid date components for Persian calendar
+            return false;
+        }
+    }
+
+    // Regex is generated at compile time in .NET 7+
+    [GeneratedRegex(@"^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})$")]
+    private static partial Regex DateRegex();
+}
+</file>
+
+<file path="ViewModels\ChangePasswordDialogViewModel.cs">
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using System.Threading.Tasks; // Required for Task
+
+namespace Dottle.ViewModels;
+
+public partial class ChangePasswordDialogViewModel : ViewModelBase
+{
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ConfirmChangeCommand))]
+    private string? _oldPassword;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ConfirmChangeCommand))]
+    private string? _newPassword;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ConfirmChangeCommand))]
+    private string? _confirmNewPassword;
+
+    [ObservableProperty]
+    private string? _errorMessage;
+
+    public delegate Task<bool> ChangePasswordDelegate(string oldPassword, string newPassword);
+
+    private readonly ChangePasswordDelegate _changePasswordAction;
+
+    public ChangePasswordDialogViewModel(ChangePasswordDelegate changePasswordAction)
+    {
+        _changePasswordAction = changePasswordAction;
+    }
+
+    private bool CanConfirmChange()
+    {
+        return !string.IsNullOrEmpty(OldPassword) &&
+               !string.IsNullOrEmpty(NewPassword) &&
+               NewPassword == ConfirmNewPassword;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanConfirmChange))]
+    private async Task ConfirmChange()
+    {
+        ErrorMessage = null;
+
+        if (string.IsNullOrEmpty(NewPassword) || NewPassword != ConfirmNewPassword)
+        {
+            ErrorMessage = "New passwords do not match or are empty.";
+            return; // Prevent closing dialog
+        }
+
+        if (NewPassword == OldPassword)
+        {
+            ErrorMessage = "New password cannot be the same as the old password.";
+            return; // Prevent closing dialog
+        }
+
+        // The actual password validation and re-encryption is handled
+        // by the delegate passed in from MainViewModel.
+        // This command primarily validates input fields locally.
+        // The dialog will be closed externally if this command completes without setting ErrorMessage.
+        await Task.CompletedTask; // Placeholder if no async needed here, but keeps signature consistent
+    }
+}
+</file>
+
+<file path="ViewModels\JournalGroupViewModel.cs">
+using System.Collections.ObjectModel;
+using System.Linq;
+
+namespace Dottle.ViewModels;
+
+public partial class JournalGroupViewModel : ViewModelBase
+{
+    public int Year { get; }
+    public ObservableCollection<JournalViewModel> Journals { get; }
+
+    public JournalGroupViewModel(int year, IEnumerable<JournalViewModel> journals)
+    {
+        Year = year;
+        Journals = new ObservableCollection<JournalViewModel>(journals.OrderByDescending(j => j.Date));
+    }
+}
+</file>
+
+<file path="ViewModels\JournalViewModel.cs">
+using Dottle.Models;
+
+namespace Dottle.ViewModels;
+
+public class JournalViewModel : ViewModelBase
+{
+    private readonly JournalEntry _journalEntry;
+
+    public string FileName => _journalEntry.FileName;
+    public string DisplayName => _journalEntry.DisplayName;
+    public DateTime Date => _journalEntry.Date;
+
+    public JournalViewModel(JournalEntry journalEntry)
+    {
+        _journalEntry = journalEntry;
+    }
+}
+</file>
+
+<file path="ViewModels\LoginViewModel.cs">
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using System;
+using System.Threading.Tasks;
+
+namespace Dottle.ViewModels;
+
+public partial class LoginViewModel : ViewModelBase
+{
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(LoginCommand))]
+    private string? _password;
+
+    [ObservableProperty]
+    private string? _errorMessage;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(LoginCommand))]
+    private bool _isLoggingIn;
+
+    public event EventHandler<string>? LoginSuccessful;
+    public event EventHandler? LoginFailed;
+
+    public LoginViewModel()
+    {
+        // Validation logic is handled within the Login command execution.
+    }
+
+    private bool CanLogin()
+    {
+        return !string.IsNullOrEmpty(Password) && !IsLoggingIn;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanLogin))]
+    private async Task Login()
+    {
+        IsLoggingIn = true;
+        ErrorMessage = null;
+        await Task.Delay(150);
+
+        // Simplified check: In a real app, attempt decryption here.
+        if (!string.IsNullOrEmpty(Password))
+        {
+            LoginSuccessful?.Invoke(this, Password);
+        }
+        else
+        {
+            ErrorMessage = "Invalid password.";
+            LoginFailed?.Invoke(this, EventArgs.Empty);
+        }
+
+        IsLoggingIn = false;
+    }
+}
+</file>
+
+<file path="ViewModels\MainViewModel.cs">
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Dottle.Models;
+using Dottle.Services;
+using Dottle.Utils;
+using System;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Dottle.ViewModels;
+
+public partial class MainViewModel : ViewModelBase
+{
+    private readonly JournalService _journalService;
+    private string _password; // Keep internal track of the current valid password
+
+    [ObservableProperty]
+    private ObservableCollection<JournalGroupViewModel> _journalGroups = new();
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsJournalSelected))]
+    [NotifyCanExecuteChangedFor(nameof(SaveJournalCommand))]
+    private JournalViewModel? _selectedJournal;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SaveJournalCommand))]
+    private string? _currentJournalContent;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SaveJournalCommand))] // Saving should wait for loading
+    private bool _isLoadingContent;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SaveJournalCommand))]
+    private bool _isSavingContent;
+
+    [ObservableProperty]
+    private string? _statusBarText;
+
+    // Properties specifically for the change password operation, set via dialog interaction
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
+    private string? _currentPasswordForChange;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
+    private string? _newPassword;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
+    private string? _confirmNewPassword; // Still needed for CanExecute
+
+    [ObservableProperty]
+    private string? _changePasswordErrorMessage;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
+    private bool _isChangingPassword;
+
+    public bool IsJournalSelected => SelectedJournal != null;
+
+    public MainViewModel(JournalService journalService, string password)
+    {
+        _journalService = journalService;
+        _password = password;
+        LoadJournalList();
+        UpdateStatusBar($"Journals loaded. Directory: {_journalService.GetJournalDirectoryPath()}");
+    }
+
+    partial void OnSelectedJournalChanged(JournalViewModel? value)
+    {
+        LoadSelectedJournalContent();
+    }
+
+    private void LoadJournalList()
+    {
+        var entries = _journalService.GetJournalEntries();
+        var viewModels = entries.Select(e => new JournalViewModel(e)).ToList();
+
+        var groups = viewModels
+            .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date))
+            .Select(g => new JournalGroupViewModel(g.Key, g.ToList()))
+            .OrderByDescending(g => g.Year);
+
+        JournalGroups = new ObservableCollection<JournalGroupViewModel>(groups);
+
+        // Reset selection and content when list reloads
+        SelectedJournal = null;
+        CurrentJournalContent = string.Empty;
+        UpdateStatusBar("Journal list refreshed.");
+    }
+
+    private async void LoadSelectedJournalContent()
+    {
+        if (SelectedJournal == null)
+        {
+            CurrentJournalContent = string.Empty;
+            return;
+        }
+
+        IsLoadingContent = true;
+        CurrentJournalContent = string.Empty; // Clear previous content
+        UpdateStatusBar($"Loading {SelectedJournal.DisplayName}...");
+        // Provide visual feedback by delaying slightly
+        await Task.Delay(50);
+
+        string? content = await Task.Run(() => // Run potentially blocking file IO/decryption on background thread
+            _journalService.ReadJournalContent(SelectedJournal.FileName, _password));
+
+        IsLoadingContent = false; // Set loading false *before* updating content
+
+        if (content != null)
+        {
+            CurrentJournalContent = content;
+            UpdateStatusBar($"Loaded {SelectedJournal.DisplayName}.");
+        }
+        else
+        {
+            // Provide more specific feedback if possible (e.g., differentiate file not found from decryption error)
+            // For now, use a generic error.
+            CurrentJournalContent = $"Error: Could not load or decrypt '{SelectedJournal.FileName}'. Check password or file integrity.";
+            UpdateStatusBar($"Error loading {SelectedJournal.DisplayName}.");
+        }
+        // Explicitly trigger CanExecuteChanged for Save command after content load attempt
+        SaveJournalCommand.NotifyCanExecuteChanged();
+    }
+
+    private bool CanSaveJournal()
+    {
+        // Can save if a journal is selected, content isn't null, and not currently loading or saving
+        return SelectedJournal != null &&
+               CurrentJournalContent != null &&
+               !IsLoadingContent &&
+               !IsSavingContent;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanSaveJournal))]
+    private async Task SaveJournal()
+    {
+        if (SelectedJournal == null || CurrentJournalContent == null) return; // Should be prevented by CanExecute
+
+        IsSavingContent = true;
+        UpdateStatusBar($"Saving {SelectedJournal.DisplayName}...");
+        await Task.Delay(50); // Brief delay for visual feedback
+
+        // Run potentially blocking file IO/encryption on background thread
+        bool success = await Task.Run(() =>
+            _journalService.SaveJournalContent(SelectedJournal.FileName, CurrentJournalContent, _password));
+
+        IsSavingContent = false; // Update state before status bar
+
+        if (success)
+        {
+            UpdateStatusBar($"Saved {SelectedJournal.DisplayName} successfully.");
+        }
+        else
+        {
+            UpdateStatusBar($"Error: Failed to save {SelectedJournal.DisplayName}.");
+        }
+        // Explicitly trigger CanExecuteChanged after save attempt
+        SaveJournalCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand]
+    private async Task CreateNewJournal() // Made async for consistency, though IO is quick
+    {
+        DateTime today = DateTime.Now;
+        string dateString = PersianCalendarHelper.GetPersianDateString(today);
+        UpdateStatusBar($"Creating journal for {dateString}...");
+
+        string? newFileName = await Task.Run(() => // Run file IO on background thread
+            _journalService.CreateNewJournal(today, _password));
+
+        if (newFileName != null)
+        {
+            LoadJournalList(); // Reload the list to include the new entry
+            // Find and select the newly created entry
+            var newEntryVm = FindJournalViewModelByFileName(newFileName);
+            SelectedJournal = newEntryVm; // This will trigger content load automatically
+            UpdateStatusBar($"Created and selected journal for {dateString}.");
+        }
+        else
+        {
+            UpdateStatusBar($"Journal for {dateString} already exists or could not be created.");
+            // Optionally select the existing entry if creation failed because it exists
+            string existingFileName = $"{dateString}.txt";
+            var existingEntryVm = FindJournalViewModelByFileName(existingFileName);
+            if (existingEntryVm != null && SelectedJournal != existingEntryVm)
+            {
+                SelectedJournal = existingEntryVm; // Select existing if not already selected
+            }
+        }
+    }
+
+    private JournalViewModel? FindJournalViewModelByFileName(string fileName)
+    {
+        return JournalGroups
+            .SelectMany(group => group.Journals)
+            .FirstOrDefault(j => j.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void UpdateStatusBar(string message)
+    {
+        // Prepend timestamp for clarity
+        StatusBarText = $"{DateTime.Now:HH:mm:ss} - {message}";
+    }
+
+    private bool CanChangePassword()
+    {
+        // Check if all required passwords are provided and match rules
+        return !string.IsNullOrEmpty(CurrentPasswordForChange) &&
+               !string.IsNullOrEmpty(NewPassword) &&
+               NewPassword == ConfirmNewPassword && // New passwords must match
+               NewPassword != CurrentPasswordForChange && // New must be different from old
+               !IsChangingPassword; // Don't allow execution if already in progress
+    }
+
+    [RelayCommand(CanExecute = nameof(CanChangePassword))]
+    private async Task ChangePassword()
+    {
+        ChangePasswordErrorMessage = null; // Clear previous error
+
+        // Perform final validation checks here, even though dialog might do some
+        if (CurrentPasswordForChange != _password)
+        {
+            ChangePasswordErrorMessage = "The Current Password provided does not match the active password.";
+            UpdateStatusBar("Password change failed: Incorrect current password.");
+            return;
+        }
+
+        // These checks are redundant if CanExecute works correctly, but good defense
+        if (string.IsNullOrEmpty(NewPassword) || NewPassword != ConfirmNewPassword)
+        {
+            ChangePasswordErrorMessage = "New passwords do not match or are empty.";
+            UpdateStatusBar("Password change failed: New passwords mismatch or empty.");
+            return;
+        }
+        if (NewPassword == _password)
+        {
+            ChangePasswordErrorMessage = "New password cannot be the same as the old password.";
+            UpdateStatusBar("Password change failed: New password is same as old.");
+            return;
+        }
+
+        IsChangingPassword = true;
+        UpdateStatusBar("Changing password and re-encrypting all journals... Please wait.");
+        await Task.Delay(50); // UI feedback delay
+
+        // Execute the potentially long-running operation on a background thread
+        bool success = await Task.Run(() =>
+            _journalService.ChangeEncryptionPassword(_password, NewPassword!));
+
+        IsChangingPassword = false; // Update state first
+
+        if (success)
+        {
+            _password = NewPassword!; // IMPORTANT: Update the internally stored password
+            CurrentPasswordForChange = null; // Clear sensitive fields after use
+            NewPassword = null;
+            ConfirmNewPassword = null;
+            ChangePasswordErrorMessage = null; // Clear any previous error message
+            UpdateStatusBar("Password changed successfully. All journals re-encrypted.");
+            // Optionally reload current journal if one is selected, as its content is now encrypted with new password
+            if (SelectedJournal is not null) LoadSelectedJournalContent();
+        }
+        else
+        {
+            // Don't clear the input fields on failure, user might want to retry
+            ChangePasswordErrorMessage = "Critical Error: Failed to re-encrypt one or more journals. Password has NOT been changed.";
+            UpdateStatusBar("Error changing password. See error message. Password remains unchanged.");
+        }
+        // Explicitly notify CanExecute changed as IsChangingPassword has changed
+        ChangePasswordCommand.NotifyCanExecuteChanged();
+    }
+}
+</file>
+
+<file path="ViewModels\MainWindowViewModel.cs">
+namespace Dottle.ViewModels
+{
+    public partial class MainWindowViewModel : ViewModelBase
+    {
+        public string Greeting { get; } = "Welcome to Avalonia!";
+    }
+}
+</file>
+
+<file path="ViewModels\ViewModelBase.cs">
+using CommunityToolkit.Mvvm.ComponentModel;
+
+namespace Dottle.ViewModels;
+
+public abstract class ViewModelBase : ObservableObject
+{
+}
+</file>
+
+<file path="Views\ChangePasswordDialog.cs">
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Interactivity; // Required for RoutedEventArgs
+using Avalonia.Layout;
+using Avalonia.Media;
+using Dottle.ViewModels;
+using System;
+using System.ComponentModel;
+using System.Threading.Tasks; // Added for async command execution check
+using System.Windows.Input;
+
+namespace Dottle.Views;
+
+public sealed class ChangePasswordDialog : Window
+{
+    private readonly TextBox _oldPasswordBox;
+    private readonly TextBox _newPasswordBox;
+    private readonly TextBox _confirmPasswordBox;
+    private readonly Button _confirmButton;
+    private readonly Button _cancelButton;
+    private readonly TextBlock _errorMessageTextBlock;
+
+    private ChangePasswordDialogViewModel? _viewModel;
+    private ICommand? _confirmCommandInstance;
+
+    public bool IsConfirmed { get; private set; } = false;
+
+    public ChangePasswordDialog()
+    {
+        Title = "Change Password";
+        Width = 400;
+        Height = 300; // Adjusted height slightly for typical content
+        CanResize = false;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        SystemDecorations = SystemDecorations.Full;
+
+        this.DataContextChanged += OnDataContextChangedHandler;
+
+        // --- Controls ---
+        _oldPasswordBox = new TextBox { Watermark = "Current Password", PasswordChar = '*', Margin = new Thickness(0, 0, 0, 10) };
+        // Corrected Handler: Assign directly to ViewModel property
+        _oldPasswordBox.TextChanged += (s, e) => { if (_viewModel != null) _viewModel.OldPassword = _oldPasswordBox.Text; };
+
+        _newPasswordBox = new TextBox { Watermark = "New Password", PasswordChar = '*', Margin = new Thickness(0, 0, 0, 10) };
+        // Corrected Handler: Assign directly to ViewModel property
+        _newPasswordBox.TextChanged += (s, e) => { if (_viewModel != null) _viewModel.NewPassword = _newPasswordBox.Text; };
+
+        _confirmPasswordBox = new TextBox { Watermark = "Confirm New Password", PasswordChar = '*', Margin = new Thickness(0, 0, 0, 15) };
+        // Corrected Handler: Assign directly to ViewModel property
+        _confirmPasswordBox.TextChanged += (s, e) => { if (_viewModel != null) _viewModel.ConfirmNewPassword = _confirmPasswordBox.Text; };
+
+        _errorMessageTextBlock = new TextBlock
+        {
+            Foreground = Brushes.Red,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 10),
+            MinHeight = 30 // Reserve space
+        };
+
+        _confirmButton = new Button { Content = "Confirm Change", IsDefault = true, IsEnabled = false, HorizontalAlignment = HorizontalAlignment.Stretch };
+        _confirmButton.Classes.Add("accent");
+        _confirmButton.Click += ConfirmButton_Click;
+
+        _cancelButton = new Button { Content = "Cancel", IsCancel = true, HorizontalAlignment = HorizontalAlignment.Stretch };
+        _cancelButton.Click += (s, e) => Close(false);
+
+        // --- Layout ---
+        var buttonPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            HorizontalAlignment = HorizontalAlignment.Right, // Align buttons to the right
+            Children = { _cancelButton, _confirmButton }
+        };
+
+        var mainPanel = new StackPanel
+        {
+            Margin = new Thickness(20),
+            Spacing = 5,
+            Children =
+            {
+                new TextBlock { Text = "Change Journal Encryption Password", FontSize = 16, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0,0,0,15), HorizontalAlignment = HorizontalAlignment.Center },
+                _oldPasswordBox,
+                _newPasswordBox,
+                _confirmPasswordBox,
+                _errorMessageTextBlock,
+                buttonPanel
+            }
+        };
+
+        Content = mainPanel;
+    }
+
+    private void OnDataContextChangedHandler(object? sender, EventArgs e)
+    {
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        }
+
+        _confirmCommandInstance = null;
+        _viewModel = DataContext as ChangePasswordDialogViewModel;
+
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            _confirmCommandInstance = _viewModel.ConfirmChangeCommand;
+
+            UpdateErrorMessage(_viewModel.ErrorMessage);
+            UpdateConfirmButtonState();
+            // Reset text boxes to reflect ViewModel state if needed (usually starts empty)
+            _oldPasswordBox.Text = _viewModel.OldPassword;
+            _newPasswordBox.Text = _viewModel.NewPassword;
+            _confirmPasswordBox.Text = _viewModel.ConfirmNewPassword;
+        }
+        else
+        {
+            UpdateErrorMessage(null);
+            UpdateConfirmButtonState();
+            _oldPasswordBox.Text = null;
+            _newPasswordBox.Text = null;
+            _confirmPasswordBox.Text = null;
+        }
+    }
+
+    private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_viewModel == null) return;
+
+        switch (e.PropertyName)
+        {
+            case nameof(ChangePasswordDialogViewModel.ErrorMessage):
+                UpdateErrorMessage(_viewModel.ErrorMessage);
+                break;
+            // These properties trigger CanExecute changes, handled by UpdateConfirmButtonState
+            case nameof(ChangePasswordDialogViewModel.OldPassword):
+            case nameof(ChangePasswordDialogViewModel.NewPassword):
+            case nameof(ChangePasswordDialogViewModel.ConfirmNewPassword):
+                UpdateConfirmButtonState();
+                break;
+        }
+    }
+
+    private async void ConfirmButton_Click(object? sender, RoutedEventArgs e)
+    {
+        if (_confirmCommandInstance?.CanExecute(null) ?? false)
+        {
+            // Execute the command (which performs local validation)
+            if (_confirmCommandInstance is CommunityToolkit.Mvvm.Input.IAsyncRelayCommand asyncCmd)
+            {
+                await asyncCmd.ExecuteAsync(null);
+            }
+            else // Fallback for non-async command, though ours is async
+            {
+                _confirmCommandInstance.Execute(null);
+            }
+
+            // Check the ViewModel's error message *after* command execution
+            if (string.IsNullOrEmpty(_viewModel?.ErrorMessage))
+            {
+                IsConfirmed = true;
+                Close(true); // Close dialog indicating success
+            }
+            // If ErrorMessage is set, the dialog stays open, and the error is displayed
+        }
+    }
+
+    private void UpdateErrorMessage(string? message)
+    {
+        _errorMessageTextBlock.Text = message ?? string.Empty;
+    }
+
+    private void UpdateConfirmButtonState()
+    {
+        _confirmButton.IsEnabled = _confirmCommandInstance?.CanExecute(null) ?? false;
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        base.OnClosed(e);
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        }
+        _viewModel = null;
+        _confirmCommandInstance = null;
+    }
+}
+</file>
+
+<file path="Views\LoginView.cs">
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Interactivity; // Required for RoutedEventArgs
+using Avalonia.Layout;
+using Avalonia.Media;
+using Dottle.ViewModels;
+using System; // Required for EventArgs
+using System.ComponentModel; // Required for PropertyChangedEventArgs
+using System.Windows.Input; // Required for ICommand
+
+namespace Dottle.Views;
+
+public sealed class LoginView : UserControl
+{
+    private readonly TextBox _passwordTextBox;
+    private readonly Button _loginButton;
+    private readonly TextBlock _errorMessageTextBlock;
+    private readonly ProgressBar _progressBar;
+
+    // Store ViewModel and Command references
+    private LoginViewModel? _viewModel;
+    private ICommand? _loginCommandInstance;
+
+    public LoginView()
+    {
+        this.DataContextChanged += OnDataContextChangedHandler;
+
+        // --- Step 1: Create and Configure Controls (NO BINDINGS) ---
+
+        var titleBlock = new TextBlock
+        {
+            Text = "Dottle Journal",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            FontSize = 24,
+            Margin = new Avalonia.Thickness(0, 0, 0, 20)
+        };
+        Grid.SetRow(titleBlock, 0);
+
+        _passwordTextBox = new TextBox
+        {
+            Watermark = "Password",
+            PasswordChar = '*', // Use '*' to mask input visually
+            Margin = new Avalonia.Thickness(0, 0, 0, 10)
+        };
+        Grid.SetRow(_passwordTextBox, 1);
+        _passwordTextBox.TextChanged += PasswordTextBox_TextChanged; // Manual VM update
+
+        _loginButton = new Button
+        {
+            Content = "Login",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Margin = new Avalonia.Thickness(0, 5, 0, 10),
+            IsEnabled = false // Start disabled, enabled via UpdateLoginButtonState
+        };
+        _loginButton.Classes.Add("accent"); // Apply theme accent style
+        Grid.SetRow(_loginButton, 2);
+        _loginButton.Click += LoginButton_Click; // Manual command execution
+
+        _errorMessageTextBlock = new TextBlock
+        {
+            Foreground = Brushes.Red, // Error messages in red
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap, // Wrap long messages
+            Margin = new Avalonia.Thickness(0, 0, 0, 10)
+            // Text set manually via PropertyChanged
+        };
+        Grid.SetRow(_errorMessageTextBlock, 3);
+
+        _progressBar = new ProgressBar
+        {
+            MinWidth = 150,
+            IsIndeterminate = true, // Show busy state
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Avalonia.Thickness(0, 5),
+            IsVisible = false // Start hidden
+            // Visibility set manually via PropertyChanged
+        };
+        Grid.SetRow(_progressBar, 4);
+
+        // --- Step 2: Create Layout Panel and Add Children ---
+        var gridLayout = new Grid
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,Auto"),
+            MaxWidth = 300,
+            // Add the created controls to the Grid's children
+            Children =
+            {
+                titleBlock,
+                _passwordTextBox,
+                _loginButton,
+                _errorMessageTextBlock,
+                _progressBar
+            }
+        };
+
+        // --- Step 3: Set Content ---
+        Content = gridLayout;
+    }
+
+    // Handle ViewModel changes
+    private void OnDataContextChangedHandler(object? sender, EventArgs e)
+    {
+        // Unsubscribe from old ViewModel if exists
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        }
+
+        _loginCommandInstance = null; // Clear previous command instance
+        _viewModel = DataContext as LoginViewModel; // Store new ViewModel
+
+        if (_viewModel != null)
+        {
+            // Subscribe to new ViewModel's changes
+            _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            _loginCommandInstance = _viewModel.LoginCommand; // Store command
+
+            // Manually update View state based on initial ViewModel state
+            UpdateErrorMessage(_viewModel.ErrorMessage);
+            UpdateProgressVisibility(_viewModel.IsLoggingIn);
+            UpdateLoginButtonState(); // Update button based on CanExecute
+        }
+        else
+        {
+            // Clear View state if ViewModel is null
+            UpdateErrorMessage(null);
+            UpdateProgressVisibility(false);
+            UpdateLoginButtonState();
+        }
+    }
+
+    // React to ViewModel property changes
+    private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_viewModel == null) return;
+
+        // Update relevant View control based on changed ViewModel property
+        switch (e.PropertyName)
+        {
+            case nameof(LoginViewModel.ErrorMessage):
+                // Update error message display
+                UpdateErrorMessage(_viewModel.ErrorMessage);
+                break;
+
+            case nameof(LoginViewModel.IsLoggingIn):
+                // Update progress bar visibility and button state
+                UpdateProgressVisibility(_viewModel.IsLoggingIn);
+                UpdateLoginButtonState();
+                break;
+
+            case nameof(LoginViewModel.Password):
+                // Update button state when password changes (affects CanExecute)
+                UpdateLoginButtonState();
+                break;
+        }
+    }
+
+    // Update password in ViewModel when TextBox changes
+    private void PasswordTextBox_TextChanged(object? sender, TextChangedEventArgs e)
+    {
+        if (_viewModel != null && sender is TextBox tb)
+        {
+            _viewModel.Password = tb.Text; // Manual two-way update
+        }
+    }
+
+    // Execute command when button is clicked
+    private void LoginButton_Click(object? sender, RoutedEventArgs e)
+    {
+        // Execute the command stored in the field if it can be executed
+        if (_loginCommandInstance?.CanExecute(null) ?? false)
+        {
+            _loginCommandInstance.Execute(null);
+        }
+    }
+
+    // --- Helper methods for updating View state ---
+    private void UpdateErrorMessage(string? message)
+    {
+        // Set the TextBlock's text, defaulting to empty if message is null
+        _errorMessageTextBlock.Text = message ?? string.Empty;
+    }
+
+    private void UpdateProgressVisibility(bool isVisible)
+    {
+        // Set the ProgressBar's visibility
+        _progressBar.IsVisible = isVisible;
+    }
+
+    private void UpdateLoginButtonState()
+    {
+        // Enable/disable button based on the stored command's CanExecute result
+        _loginButton.IsEnabled = _loginCommandInstance?.CanExecute(null) ?? false;
+    }
+
+    // Ensure cleanup on unload
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        // Unsubscribe from PropertyChanged event to prevent memory leaks
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        }
+        // Clear references
+        _viewModel = null;
+        _loginCommandInstance = null;
+    }
+}
+</file>
+
+<file path="Views\MainView.cs">
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Templates;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Dottle.ViewModels;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Linq;
+using System.Threading.Tasks; // Added for async dialog showing
+using System.Windows.Input;
+
+namespace Dottle.Views;
+
+public sealed class MainView : UserControl
+{
+    private readonly ListBox _journalListBox;
+    private readonly TextBox _editorTextBox;
+    private readonly TextBlock _statusBarTextBlock;
+    private readonly Button _saveButton;
+    private readonly Button _newButton;
+    private readonly Menu _menuBar;
+
+    private MainViewModel? _viewModel;
+    private ICommand? _createNewJournalCommand;
+    private ICommand? _saveJournalCommand;
+    // No need to store ChangePassword command here, it's triggered indirectly
+
+    private bool _isSyncingSelection = false;
+    private bool _isSyncingText = false;
+
+    public MainView()
+    {
+        this.DataContextChanged += OnDataContextChangedHandler;
+
+        // --- Menu Bar ---
+        var changePasswordMenuItem = new MenuItem { Header = "Change Password..." };
+        changePasswordMenuItem.Click += ChangePasswordMenuItem_Click; // Assign click handler
+
+        var securityMenu = new MenuItem
+        {
+            Header = "_Security",
+            Items = { changePasswordMenuItem }
+        };
+
+        _menuBar = new Menu
+        {
+            Items = { securityMenu }
+        };
+        DockPanel.SetDock(_menuBar, Dock.Top);
+
+        // --- Left Panel Components ---
+        _newButton = new Button
+        {
+            Content = "New Journal",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Margin = new Thickness(5),
+            IsEnabled = false
+        };
+        DockPanel.SetDock(_newButton, Dock.Top);
+        _newButton.Click += NewButton_Click;
+
+        _journalListBox = new ListBox
+        {
+            Background = Brushes.Transparent,
+            ItemTemplate = JournalDataTemplate()
+        };
+        _journalListBox.SelectionChanged += JournalListBox_SelectionChanged;
+
+        var journalListScrollViewer = new ScrollViewer { Content = _journalListBox };
+        var leftDockPanel = new DockPanel { Children = { _newButton, journalListScrollViewer } };
+        var leftBorder = new Border
+        {
+            BorderBrush = SolidColorBrush.Parse("#444"),
+            BorderThickness = new Thickness(0, 0, 1, 0),
+            Child = leftDockPanel
+        };
+        Grid.SetColumn(leftBorder, 0); Grid.SetRow(leftBorder, 0);
+
+        // --- Right Panel Components ---
+        _saveButton = new Button
+        {
+            Content = "Save Journal",
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(5),
+            IsEnabled = false
+        };
+        _saveButton.Classes.Add("accent");
+        DockPanel.SetDock(_saveButton, Dock.Top);
+        _saveButton.Click += SaveButton_Click;
+
+        _editorTextBox = new TextBox
+        {
+            AcceptsReturn = true,
+            AcceptsTab = true,
+            TextWrapping = TextWrapping.Wrap,
+            FontFamily = new FontFamily("Cascadia Mono, Consolas, Courier New, monospace"),
+            FontSize = 13,
+            Padding = new Thickness(5),
+            VerticalAlignment = VerticalAlignment.Stretch,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            IsEnabled = false,
+            IsReadOnly = false // Start as editable, disable based on state
+        };
+        _editorTextBox.TextChanged += EditorTextBox_TextChanged;
+
+        var rightDockPanel = new DockPanel { Children = { _saveButton, _editorTextBox } };
+        Grid.SetColumn(rightDockPanel, 1); Grid.SetRow(rightDockPanel, 0);
+
+        // --- Status Bar Components ---
+        _statusBarTextBlock = new TextBlock
+        {
+            FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var bottomBorder = new Border
+        {
+            Background = SolidColorBrush.Parse("#2a2a2a"),
+            BorderBrush = SolidColorBrush.Parse("#444"),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Padding = new Thickness(5, 3),
+            Child = _statusBarTextBlock
+        };
+        Grid.SetColumn(bottomBorder, 0); Grid.SetRow(bottomBorder, 1); Grid.SetColumnSpan(bottomBorder, 2);
+
+        // --- Top Level Container ---
+        var mainDockPanel = new DockPanel();
+        mainDockPanel.Children.Add(_menuBar);
+
+        var contentGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,*"),
+            RowDefinitions = new RowDefinitions("*,Auto"),
+            Children = { leftBorder, rightDockPanel, bottomBorder }
+        };
+        mainDockPanel.Children.Add(contentGrid);
+
+        Content = mainDockPanel;
+    }
+
+    private void OnDataContextChangedHandler(object? sender, EventArgs e)
+    {
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        }
+
+        _viewModel = DataContext as MainViewModel;
+        _createNewJournalCommand = null;
+        _saveJournalCommand = null;
+
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            _createNewJournalCommand = _viewModel.CreateNewJournalCommand;
+            _saveJournalCommand = _viewModel.SaveJournalCommand;
+
+            UpdateJournalList(_viewModel.JournalGroups);
+            UpdateEditorText(_viewModel.CurrentJournalContent);
+            UpdateSelectedItem(_viewModel.SelectedJournal);
+            UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
+            UpdateStatusBar(_viewModel.StatusBarText);
+            UpdateNewButtonState();
+            UpdateSaveButtonState();
+        }
+        else
+        {
+            UpdateJournalList(null);
+            UpdateEditorText(null);
+            UpdateEditorState(false, false);
+            UpdateStatusBar(null);
+            UpdateNewButtonState();
+            UpdateSaveButtonState();
+        }
+    }
+
+    private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_viewModel == null) return;
+
+        switch (e.PropertyName)
+        {
+            case nameof(MainViewModel.JournalGroups):
+                UpdateJournalList(_viewModel.JournalGroups);
+                break;
+            case nameof(MainViewModel.SelectedJournal):
+                UpdateSelectedItem(_viewModel.SelectedJournal);
+                UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
+                UpdateSaveButtonState();
+                UpdateEditorText(_viewModel.CurrentJournalContent);
+                break;
+            case nameof(MainViewModel.CurrentJournalContent):
+                UpdateEditorText(_viewModel.CurrentJournalContent);
+                UpdateSaveButtonState();
+                break;
+            case nameof(MainViewModel.IsLoadingContent):
+                UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
+                break;
+            case nameof(MainViewModel.IsSavingContent):
+                UpdateSaveButtonState();
+                break;
+            case nameof(MainViewModel.StatusBarText):
+                UpdateStatusBar(_viewModel.StatusBarText);
+                break;
+            case nameof(MainViewModel.IsChangingPassword): // Update relevant UI if needed
+                // Maybe disable the 'Change Password' menu item while processing?
+                break;
+            case nameof(MainViewModel.ChangePasswordErrorMessage): // Display errors from main VM
+                if (!string.IsNullOrEmpty(_viewModel.ChangePasswordErrorMessage))
+                {
+                    // Optionally show this in a more prominent way, e.g., temporary status bar message
+                    // Or rely on the status bar text already being updated by the command
+                }
+                break;
+        }
+    }
+
+    private void JournalListBox_SelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_viewModel == null || _isSyncingSelection) return;
+
+        _viewModel.SelectedJournal = _journalListBox.SelectedItem as JournalViewModel;
+    }
+
+    private void EditorTextBox_TextChanged(object? sender, TextChangedEventArgs e)
+    {
+        if (_viewModel == null || _isSyncingText) return;
+
+        _viewModel.CurrentJournalContent = _editorTextBox.Text;
+    }
+
+    private void NewButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _createNewJournalCommand?.Execute(null);
+    }
+
+    private void SaveButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _saveJournalCommand?.Execute(null);
+    }
+
+    private async void ChangePasswordMenuItem_Click(object? sender, RoutedEventArgs e)
+    {
+        if (_viewModel == null) return;
+
+        var dialogViewModel = new ChangePasswordDialogViewModel(async (oldPass, newPass) =>
+        {
+            // This delegate doesn't run the command directly,
+            // it's just here to satisfy the constructor.
+            // The real work happens after the dialog closes.
+            await Task.CompletedTask;
+            return true; // Placeholder
+        });
+
+        var dialog = new ChangePasswordDialog
+        {
+            DataContext = dialogViewModel
+        };
+
+        if (this.VisualRoot is not Window owner) return;
+
+        var dialogResult = await dialog.ShowDialog<bool>(owner);
+
+        if (dialogResult && dialog.IsConfirmed && _viewModel != null && dialogViewModel != null) // Check IsConfirmed and VM null states
+        {
+            // Transfer confirmed passwords to MainViewModel properties
+            _viewModel.CurrentPasswordForChange = dialogViewModel.OldPassword;
+            _viewModel.NewPassword = dialogViewModel.NewPassword;
+            _viewModel.ConfirmNewPassword = dialogViewModel.ConfirmNewPassword; // Needed for CanExecute
+
+            // Now execute the command on MainViewModel
+            if (_viewModel.ChangePasswordCommand.CanExecute(null))
+            {
+                // The command is async, but we don't necessarily need to await it here
+                // as it updates the UI (status bar, IsChangingPassword) via bindings.
+                _ = _viewModel.ChangePasswordCommand.ExecuteAsync(null);
+            }
+            else
+            {
+                // This case shouldn't normally happen if dialog validation is correct,
+                // but handle defensively. Maybe update status bar?
+                UpdateStatusBar("Could not initiate password change.");
+            }
+        }
+    }
+
+
+    private void UpdateJournalList(IEnumerable<JournalGroupViewModel>? groups)
+    {
+        _journalListBox.ItemsSource = groups;
+        if (_viewModel?.SelectedJournal == null)
+        {
+            UpdateSelectedItem(null);
+        }
+    }
+
+    private void UpdateSelectedItem(JournalViewModel? selectedJournalVm)
+    {
+        if (_isSyncingSelection) return;
+
+        _isSyncingSelection = true;
+        try
+        {
+            if (!object.Equals(_journalListBox.SelectedItem, selectedJournalVm))
+            {
+                _journalListBox.SelectedItem = selectedJournalVm;
+                if (selectedJournalVm != null)
+                {
+                    _journalListBox.ScrollIntoView(selectedJournalVm);
+                }
+            }
+        }
+        finally
+        {
+            _isSyncingSelection = false;
+        }
+    }
+
+    private void UpdateEditorText(string? text)
+    {
+        if (_isSyncingText) return;
+
+        _isSyncingText = true;
+        try
+        {
+            var currentText = _editorTextBox.Text ?? string.Empty;
+            var newText = text ?? string.Empty;
+            if (currentText != newText)
+            {
+                _editorTextBox.Text = newText;
+            }
+        }
+        finally
+        {
+            _isSyncingText = false;
+        }
+    }
+
+    private void UpdateEditorState(bool isEnabled, bool isLoading)
+    {
+        _editorTextBox.IsEnabled = isEnabled && !isLoading;
+        _editorTextBox.IsReadOnly = isLoading; // Make read-only while loading
+    }
+
+    private void UpdateStatusBar(string? text)
+    {
+        _statusBarTextBlock.Text = text ?? string.Empty;
+    }
+
+    private void UpdateNewButtonState()
+    {
+        _newButton.IsEnabled = _createNewJournalCommand?.CanExecute(null) ?? false;
+    }
+
+    private void UpdateSaveButtonState()
+    {
+        bool canSave = _saveJournalCommand?.CanExecute(null) ?? false;
+        _saveButton.IsEnabled = canSave && _editorTextBox.IsEnabled; // Also consider if editor is enabled
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        }
+        _viewModel = null;
+        _createNewJournalCommand = null;
+        _saveJournalCommand = null;
+    }
+
+    private static IDataTemplate JournalDataTemplate()
+    {
+        return new FuncDataTemplate<object>((data, ns) =>
+        {
+            if (data is JournalGroupViewModel groupVm)
+            {
+                var itemsControl = new ItemsControl
+                {
+                    ItemsSource = groupVm.Journals,
+                    ItemTemplate = JournalItemTemplate()
+                };
+
+                return new StackPanel
+                {
+                    Spacing = 4,
+                    Margin = new Thickness(5, 8, 5, 4),
+                    Children =
+                    {
+                        new TextBlock
+                        {
+                            Text = groupVm.Year.ToString(),
+                            FontSize = 16,
+                            FontWeight = FontWeight.Bold,
+                            Margin = new Thickness(0, 0, 0, 5)
+                        },
+                        itemsControl
+                    }
+                };
+            }
+            return new TextBlock { Text = "Invalid item type in ListBox" };
+        }, supportsRecycling: true);
+    }
+
+    private static IDataTemplate JournalItemTemplate()
+    {
+        return new FuncDataTemplate<JournalViewModel>((journalVm, ns) =>
+            new TextBlock
+            {
+                Text = journalVm.DisplayName,
+                Padding = new Thickness(15, 3, 5, 3),
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            },
+            supportsRecycling: true);
+    }
+}
+</file>
+
+<file path="Views\MainWindow.axaml.cs">
+using Avalonia.Controls;
+
+namespace Dottle.Views
+{
+    public partial class MainWindow : Window
+    {
+        public MainWindow()
+        {
+            InitializeComponent();
+        }
+    }
+}
+</file>
+
+<file path="Views\ViewBase.cs">
+using Avalonia.Controls;
+using Dottle.ViewModels; // Assuming ViewModels namespace
+
+namespace Dottle.Views;
+
+// Simple base class if needed, though often not strictly necessary
+// if setting DataContext directly in constructors or App setup.
+public abstract class ViewBase<TViewModel> : UserControl where TViewModel : ViewModelBase
+{
+    public TViewModel? ViewModel => DataContext as TViewModel;
+
+    protected override void OnDataContextChanged(EventArgs e)
+    {
+        base.OnDataContextChanged(e);
+        // Can add common logic here if needed when DataContext changes
+    }
+}
+</file>
+

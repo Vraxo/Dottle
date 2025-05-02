@@ -1,7 +1,7 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using System.Security; // Required for SecureString if used, but sticking to string for simplicity here.
-using System.Threading.Tasks; // For async command
+using System;
+using System.Threading.Tasks;
 
 namespace Dottle.ViewModels;
 
@@ -15,19 +15,15 @@ public partial class LoginViewModel : ViewModelBase
     private string? _errorMessage;
 
     [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(LoginCommand))]
     private bool _isLoggingIn;
 
     public event EventHandler<string>? LoginSuccessful;
     public event EventHandler? LoginFailed;
 
-    private readonly string _testPassword = "password"; // In a real app, this isn't stored. We'd try decryption.
-
     public LoginViewModel()
     {
-        // In a real scenario, we wouldn't have a predefined password here.
-        // The "correct" password is the one that successfully decrypts *any* existing journal file.
-        // Or, if no files exist, the first password entered is used to create the first file.
-        // For this example, we'll simulate a check.
+        // Validation logic is handled within the Login command execution.
     }
 
     private bool CanLogin()
@@ -40,22 +36,12 @@ public partial class LoginViewModel : ViewModelBase
     {
         IsLoggingIn = true;
         ErrorMessage = null;
-        await Task.Delay(150); // Simulate check
+        await Task.Delay(150);
 
-        // !! IMPORTANT !!
-        // In a real application, the validation logic is different.
-        // You would typically:
-        // 1. Get the list of journal files.
-        // 2. Try to decrypt the *first* file found using the entered password.
-        // 3. If successful, the password is correct. Store it (or better, the derived key).
-        // 4. If it fails, the password is wrong.
-        // 5. If NO journal files exist yet, accept the entered password as the new password
-        //    and use it to encrypt the first journal created.
-
-        // Simplified check for this example:
-        if (!string.IsNullOrEmpty(Password)) // Replace with real decryption check attempt
+        // Simplified check: In a real app, attempt decryption here.
+        if (!string.IsNullOrEmpty(Password))
         {
-            LoginSuccessful?.Invoke(this, Password); // Pass password to derive key later
+            LoginSuccessful?.Invoke(this, Password);
         }
         else
         {
