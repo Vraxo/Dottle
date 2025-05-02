@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RootNamespace>Dottle</RootNamespace>
+    <!-- Configuration for single-file deployment -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.0.10" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.0.10" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.10" />
+    <!-- Explicitly reference Avalonia.Skia -->
+    <PackageReference Include="Avalonia.Skia" Version="11.0.10" />
+    <!-- Condition below is needed to remove Avalonia.Diagnostics package from build output in Release configuration. -->
+    <PackageReference Condition="'$(Configuration)' == 'Debug'" Include="Avalonia.Diagnostics" Version="11.0.10" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+  </ItemGroup>
+
+  <!-- Ensure Journals directory is created during build if needed, but it's better handled at runtime -->
+  <!-- <ItemGroup> -->
+  <!--   <Content Include="Journals\**"> -->
+  <!--     <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory> -->
+  <!--   </Content> -->
+  <!-- </ItemGroup> -->
+
+</Project>
