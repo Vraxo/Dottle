@@ -1,18 +1,8 @@
-﻿using System;
+﻿namespace Dottle.Models;
 
-namespace Dottle.Models;
-
-public class JournalEntry
+public class JournalEntry(string fileName, DateTime date)
 {
-    public string FileName { get; }
-    public DateTime Date { get; }
-    public string DisplayName { get; } // e.g., "1404-02-10"
-
-    public JournalEntry(string fileName, DateTime date)
-    {
-        FileName = fileName;
-        Date = date;
-        // Assuming filename is already in YYYY-MM-DD.txt format
-        DisplayName = Path.GetFileNameWithoutExtension(fileName);
-    }
+    public string FileName { get; } = fileName;
+    public DateTime Date { get; } = date;
+    public string DisplayName { get; } = Path.GetFileNameWithoutExtension(fileName);
 }
