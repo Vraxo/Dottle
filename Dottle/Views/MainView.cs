@@ -6,8 +6,8 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Threading;
-using Avalonia.VisualTree;
+using Avalonia.Threading; // Required for Dispatcher
+using Avalonia.VisualTree; // Required for FindAncestorOfType, FindDescendantOfType
 using Dottle.ViewModels;
 using System;
 using System.Collections.Generic;
@@ -28,12 +28,11 @@ public sealed class MainView : UserControl
     private readonly Menu _menuBar;
 
     private MainViewModel? _viewModel;
-    // Renamed command reference field
-    private ICommand? _requestNewJournalDateCommand;
+    private ICommand? _createNewJournalCommand;
     private ICommand? _saveJournalCommand;
 
     private bool _isSyncingText = false;
-    private ListBoxItem? _currentlySelectedListBoxItem = null;
+    private ListBoxItem? _currentlySelectedListBoxItem = null; // Track visual selection
 
     public MainView()
     {
@@ -59,17 +58,18 @@ public sealed class MainView : UserControl
             Content = "New Journal",
             HorizontalAlignment = HorizontalAlignment.Stretch,
             Margin = new Thickness(5),
-            IsEnabled = false // Initial state, enabled by VM command CanExecute
+            IsEnabled = false
         };
         DockPanel.SetDock(_newButton, Dock.Top);
-        _newButton.Click += NewButton_Click; // Click handler executes the VM command
+        _newButton.Click += NewButton_Click;
 
         _journalListBox = new ListBox
         {
             Background = Brushes.Transparent,
             ItemTemplate = JournalDataTemplate(),
-            SelectionMode = SelectionMode.Single
+            SelectionMode = SelectionMode.Single // Explicitly single, though we manage visuals
         };
+        // SelectionChanged handler removed - selection handled by PointerPressed on items
 
         var journalListScrollViewer = new ScrollViewer { Content = _journalListBox };
         var leftDockPanel = new DockPanel { Children = { _newButton, journalListScrollViewer } };
@@ -139,58 +139,37 @@ public sealed class MainView : UserControl
         Content = mainDockPanel;
     }
 
-    // Get owner window reference when attached
-    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
-    {
-        base.OnAttachedToVisualTree(e);
-        if (_viewModel != null)
-        {
-            // Pass owner window ref to VM for dialogs
-            _viewModel.OwnerWindow = this.VisualRoot as Window;
-        }
-    }
-
-
     private void OnDataContextChangedHandler(object? sender, EventArgs e)
     {
         if (_viewModel != null)
         {
             _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
-            _viewModel.OwnerWindow = null; // Clear owner reference
         }
 
         _viewModel = DataContext as MainViewModel;
-        // Reset command references
-        _requestNewJournalDateCommand = null;
+        _createNewJournalCommand = null;
         _saveJournalCommand = null;
-        _currentlySelectedListBoxItem = null;
+        _currentlySelectedListBoxItem = null; // Reset visual selection tracking
 
         if (_viewModel != null)
         {
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
-            // Fetch correct command reference
-            _requestNewJournalDateCommand = _viewModel.RequestNewJournalDateCommand;
+            _createNewJournalCommand = _viewModel.CreateNewJournalCommand;
             _saveJournalCommand = _viewModel.SaveJournalCommand;
-
-            // Set owner window ref on VM if we are already attached
-            if (this.IsAttachedToVisualTree())
-            {
-                _viewModel.OwnerWindow = this.VisualRoot as Window;
-            }
 
             UpdateJournalList(_viewModel.JournalGroups);
             UpdateEditorText(_viewModel.CurrentJournalContent);
-            UpdateVisualSelection(_viewModel.SelectedJournal);
+            UpdateVisualSelection(_viewModel.SelectedJournal); // Sync visual selection
             UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
             UpdateStatusBar(_viewModel.StatusBarText);
-            UpdateNewButtonState(); // Update state based on new command
+            UpdateNewButtonState();
             UpdateSaveButtonState();
         }
         else
         {
             UpdateJournalList(null);
             UpdateEditorText(null);
-            UpdateVisualSelection(null);
+            UpdateVisualSelection(null); // Clear visual selection
             UpdateEditorState(false, false);
             UpdateStatusBar(null);
             UpdateNewButtonState();
@@ -206,12 +185,16 @@ public sealed class MainView : UserControl
         {
             case nameof(MainViewModel.JournalGroups):
                 UpdateJournalList(_viewModel.JournalGroups);
+                // Ensure selection visual state is correct after list reload
                 UpdateVisualSelection(_viewModel.SelectedJournal);
                 break;
             case nameof(MainViewModel.SelectedJournal):
+                // Update the visual selection state of the ListBoxItems
                 UpdateVisualSelection(_viewModel.SelectedJournal);
+                // Update editor state etc. based on the *new* selection
                 UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
                 UpdateSaveButtonState();
+                // Content loading is triggered by the VM itself, just update editor text display
                 UpdateEditorText(_viewModel.CurrentJournalContent);
                 break;
             case nameof(MainViewModel.CurrentJournalContent):
@@ -244,10 +227,9 @@ public sealed class MainView : UserControl
         _viewModel.CurrentJournalContent = _editorTextBox.Text;
     }
 
-    // Executes the VM command to show the date dialog
     private void NewButton_Click(object? sender, RoutedEventArgs e)
     {
-        _requestNewJournalDateCommand?.Execute(null);
+        _createNewJournalCommand?.Execute(null);
     }
 
     private void SaveButton_Click(object? sender, RoutedEventArgs e)
@@ -257,7 +239,7 @@ public sealed class MainView : UserControl
 
     private async void ChangePasswordMenuItem_Click(object? sender, RoutedEventArgs e)
     {
-        if (_viewModel == null || _viewModel.OwnerWindow == null) return;
+        if (_viewModel == null) return;
 
         var dialogViewModel = new ChangePasswordDialogViewModel(async (oldPass, newPass) =>
         {
@@ -270,7 +252,9 @@ public sealed class MainView : UserControl
             DataContext = dialogViewModel
         };
 
-        var dialogResult = await dialog.ShowDialog<bool>(_viewModel.OwnerWindow);
+        if (this.VisualRoot is not Window owner) return;
+
+        var dialogResult = await dialog.ShowDialog<bool>(owner);
 
         if (dialogResult && dialog.IsConfirmed && _viewModel != null && dialogViewModel != null)
         {
@@ -291,6 +275,7 @@ public sealed class MainView : UserControl
 
     private void UpdateJournalList(IEnumerable<JournalGroupViewModel>? groups)
     {
+        // Clear visual selection before updating source to avoid dangling references
         if (_currentlySelectedListBoxItem != null)
         {
             _currentlySelectedListBoxItem.IsSelected = false;
@@ -301,6 +286,7 @@ public sealed class MainView : UserControl
 
     private void UpdateVisualSelection(JournalViewModel? newSelection)
     {
+        // Deselect the previously selected item visually
         if (_currentlySelectedListBoxItem != null)
         {
             _currentlySelectedListBoxItem.IsSelected = false;
@@ -309,30 +295,39 @@ public sealed class MainView : UserControl
 
         if (newSelection == null || _journalListBox.ItemsSource == null) return;
 
+        // Find and select the new item visually
         foreach (var group in _journalListBox.ItemsSource.OfType<JournalGroupViewModel>())
         {
             var groupContainer = _journalListBox.ContainerFromItem(group) as Control;
             if (groupContainer == null)
             {
+                // Try scrolling the group into view if its container isn't realized
                 _journalListBox.ScrollIntoView(group);
+                // We might need to wait for layout, finding the item might fail this pass
                 continue;
             }
 
+            // Find the nested ItemsControl within the group container's visual tree
             var nestedItemsControl = groupContainer.FindDescendantOfType<ItemsControl>();
             if (nestedItemsControl == null) continue;
 
+            // Try finding the container for the specific journal entry
             var newItemContainer = nestedItemsControl.ContainerFromItem(newSelection) as ListBoxItem;
 
             if (newItemContainer != null)
             {
                 newItemContainer.IsSelected = true;
                 _currentlySelectedListBoxItem = newItemContainer;
-                _journalListBox.ScrollIntoView(group);
+                // Ensure the selected item is visible
+                _journalListBox.ScrollIntoView(group); // Ensure group is visible first
+                // Post BringIntoView to run after layout pass potentially triggered by ScrollIntoView
                 Dispatcher.UIThread.Post(() => newItemContainer.BringIntoView(), DispatcherPriority.Background);
-                break;
+                break; // Found it
             }
             else
             {
+                // If the item container is not found (virtualized?), try scrolling the item into view
+                // This might realize the container for a subsequent update pass.
                 nestedItemsControl.ScrollIntoView(newSelection);
             }
         }
@@ -369,10 +364,9 @@ public sealed class MainView : UserControl
         _statusBarTextBlock.Text = text ?? string.Empty;
     }
 
-    // Update button state based on the correct command
     private void UpdateNewButtonState()
     {
-        _newButton.IsEnabled = _requestNewJournalDateCommand?.CanExecute(null) ?? false;
+        _newButton.IsEnabled = _createNewJournalCommand?.CanExecute(null) ?? false;
     }
 
     private void UpdateSaveButtonState()
@@ -387,10 +381,9 @@ public sealed class MainView : UserControl
         if (_viewModel != null)
         {
             _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
-            _viewModel.OwnerWindow = null; // Clear owner on detach
         }
         _viewModel = null;
-        _requestNewJournalDateCommand = null;
+        _createNewJournalCommand = null;
         _saveJournalCommand = null;
         _currentlySelectedListBoxItem = null;
     }
@@ -404,7 +397,8 @@ public sealed class MainView : UserControl
                 var itemsControl = new ItemsControl
                 {
                     ItemsSource = groupVm.Journals,
-                    ItemTemplate = JournalItemTemplate(),
+                    ItemTemplate = JournalItemTemplate(), // Use the ListBoxItem template
+                    // Make nested ItemsControl non-focusable itself, items handle focus
                     Focusable = false
                 };
 
@@ -420,7 +414,7 @@ public sealed class MainView : UserControl
                             FontSize = 16,
                             FontWeight = FontWeight.Bold,
                             Margin = new Thickness(0, 0, 0, 5),
-                            IsEnabled = false,
+                            IsEnabled = false, // Header not interactive
                             Cursor = Cursor.Default
                         },
                         itemsControl
@@ -433,23 +427,25 @@ public sealed class MainView : UserControl
 
     private static IDataTemplate JournalItemTemplate()
     {
+        // Template for the content *inside* the ListBoxItem
         var textBlockTemplate = new FuncDataTemplate<JournalViewModel>((vm, ns) =>
             new TextBlock
             {
                 Text = vm.DisplayName,
-                Padding = new Thickness(0),
+                Padding = new Thickness(0), // Let ListBoxItem handle padding if needed
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center
             }, supportsRecycling: true);
 
+        // Template that creates the ListBoxItem itself
         return new FuncDataTemplate<JournalViewModel>((journalVm, ns) =>
         {
             var item = new ListBoxItem
             {
                 DataContext = journalVm,
-                Content = journalVm,
+                Content = journalVm, // Data for the ContentTemplate
                 ContentTemplate = textBlockTemplate,
-                Padding = new Thickness(15, 3, 5, 3),
+                Padding = new Thickness(15, 3, 5, 3), // Apply padding here for indentation
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center,
                 Cursor = new Cursor(StandardCursorType.Hand)
@@ -460,6 +456,7 @@ public sealed class MainView : UserControl
         supportsRecycling: true);
     }
 
+    // Static handler for clicking on a journal item ListBoxItem
     private static void JournalItem_PointerPressed(object? sender, PointerPressedEventArgs e)
     {
         if (sender is ListBoxItem { DataContext: JournalViewModel journalVm } item)
@@ -467,10 +464,12 @@ public sealed class MainView : UserControl
             var mainView = item.FindAncestorOfType<MainView>();
             if (mainView?._viewModel != null)
             {
+                // Only update ViewModel if selection actually changed
                 if (!ReferenceEquals(mainView._viewModel.SelectedJournal, journalVm))
                 {
                     mainView._viewModel.SelectedJournal = journalVm;
                 }
+                // Visual update is handled by UpdateVisualSelection via PropertyChanged
                 e.Handled = true;
             }
         }
