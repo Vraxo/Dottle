@@ -1,10 +1,10 @@
-﻿using Avalonia.Controls; // Required for Window reference in ShowDialogAsync
+﻿using Avalonia.Controls;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dottle.Models;
 using Dottle.Services;
 using Dottle.Utils;
-using Dottle.Views; // Required for NewJournalDialog
+using Dottle.Views;
 using System;
 using System.Collections.ObjectModel;
 using System.Linq;
@@ -59,7 +59,6 @@ public partial class MainViewModel : ViewModelBase
     [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
     private bool _isChangingPassword;
 
-    // Property to hold the reference to the main window for dialog owner
     public Window? OwnerWindow { get; set; }
 
     public bool IsJournalSelected => SelectedJournal != null;
@@ -158,14 +157,13 @@ public partial class MainViewModel : ViewModelBase
         SaveJournalCommand.NotifyCanExecuteChanged();
     }
 
-    // Renamed and modified command for creating new journal
     [RelayCommand]
     private async Task RequestNewJournalDate()
     {
         if (OwnerWindow == null)
         {
             UpdateStatusBar("Error: Cannot show dialog, owner window not set.");
-            return; // Cannot show dialog without owner
+            return;
         }
 
         var dialogViewModel = new NewJournalDialogViewModel();
@@ -174,24 +172,24 @@ public partial class MainViewModel : ViewModelBase
             DataContext = dialogViewModel
         };
 
-        // Show the dialog and wait for the result
         bool? dialogResult = await dialog.ShowDialog<bool?>(OwnerWindow);
 
         if (dialogResult == true && dialog.IsConfirmed)
         {
-            DateTime selectedDate = dialog.SelectedDate; // Get date from dialog
+            DateTime selectedDate = dialog.SelectedDate;
+            string selectedMood = dialog.SelectedMood; // Get mood from dialog
             string dateString = PersianCalendarHelper.GetPersianDateString(selectedDate);
-            UpdateStatusBar($"Creating journal for {dateString}...");
+            UpdateStatusBar($"Creating journal for {dateString} with mood {selectedMood}...");
 
-            // Run file IO on background thread
+            // Pass mood to service
             string? newFileName = await Task.Run(() =>
-                _journalService.CreateNewJournal(selectedDate, _password));
+                _journalService.CreateNewJournal(selectedDate, selectedMood, _password));
 
             if (newFileName != null)
             {
-                LoadJournalList(); // Reload list
+                LoadJournalList();
                 var newEntryVm = FindJournalViewModelByFileName(newFileName);
-                SelectedJournal = newEntryVm; // Select the new entry
+                SelectedJournal = newEntryVm;
                 UpdateStatusBar($"Created and selected journal for {dateString}.");
             }
             else

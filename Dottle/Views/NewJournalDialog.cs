@@ -1,12 +1,13 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Interactivity; // Required for RoutedEventArgs
+using Avalonia.Interactivity;
 using Avalonia.Layout;
-using Avalonia.Media; // Required for Brushes
+using Avalonia.Media;
 using Dottle.ViewModels;
 using System;
-using System.ComponentModel; // Required for PropertyChangedEventArgs
-using System.Windows.Input; // Required for ICommand
+using System.ComponentModel;
+using System.Linq; // Required for OfType
+using System.Windows.Input;
 
 namespace Dottle.Views;
 
@@ -14,6 +15,7 @@ public sealed class NewJournalDialog : Window
 {
     private readonly DatePicker _datePicker;
     private readonly TextBlock _persianDateTextBlock;
+    private readonly StackPanel _moodSelectionPanel; // Panel to hold mood selectors
     private readonly TextBlock _errorMessageTextBlock;
     private readonly Button _confirmButton;
     private readonly Button _cancelButton;
@@ -23,12 +25,13 @@ public sealed class NewJournalDialog : Window
 
     public bool IsConfirmed { get; private set; } = false;
     public DateTime SelectedDate { get; private set; }
+    public string SelectedMood { get; private set; } = string.Empty; // Store selected mood
 
     public NewJournalDialog()
     {
         Title = "Create New Journal";
-        Width = 350;
-        Height = 250; // Adjusted height
+        Width = 380; // Slightly wider for moods
+        Height = 320; // Increased height for moods
         CanResize = false;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         SystemDecorations = SystemDecorations.Full;
@@ -41,7 +44,6 @@ public sealed class NewJournalDialog : Window
             Margin = new Thickness(0, 0, 0, 10),
             HorizontalAlignment = HorizontalAlignment.Stretch
         };
-        // Bind SelectedDate manually
         _datePicker.SelectedDateChanged += (s, e) =>
         {
             if (_viewModel != null) _viewModel.SelectedDate = _datePicker.SelectedDate;
@@ -50,10 +52,19 @@ public sealed class NewJournalDialog : Window
         _persianDateTextBlock = new TextBlock
         {
             HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 15),
+            Margin = new Thickness(0, 0, 0, 10), // Adjusted margin
             FontWeight = FontWeight.SemiBold
-            // Text set via PropertyChanged
         };
+
+        // --- Mood Selection Panel ---
+        _moodSelectionPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 15,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 15)
+        };
+        // RadioButtons will be added dynamically in OnDataContextChangedHandler
 
         _errorMessageTextBlock = new TextBlock
         {
@@ -61,7 +72,7 @@ public sealed class NewJournalDialog : Window
             HorizontalAlignment = HorizontalAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 10),
-            MinHeight = 20 // Reserve space
+            MinHeight = 20
         };
 
         _confirmButton = new Button { Content = "Create Journal", IsDefault = true, IsEnabled = false, HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -69,7 +80,7 @@ public sealed class NewJournalDialog : Window
         _confirmButton.Click += ConfirmButton_Click;
 
         _cancelButton = new Button { Content = "Cancel", IsCancel = true, HorizontalAlignment = HorizontalAlignment.Stretch };
-        _cancelButton.Click += (s, e) => CloseDialog(false); // Use helper
+        _cancelButton.Click += (s, e) => CloseDialog(false);
 
         // --- Layout ---
         var buttonPanel = new StackPanel
@@ -86,9 +97,11 @@ public sealed class NewJournalDialog : Window
             Spacing = 5,
             Children =
             {
-                new TextBlock { Text = "Select Date for New Journal", FontSize = 16, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0,0,0,15), HorizontalAlignment = HorizontalAlignment.Center },
+                new TextBlock { Text = "Select Date and Mood", FontSize = 16, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0,0,0,15), HorizontalAlignment = HorizontalAlignment.Center },
                 _datePicker,
                 _persianDateTextBlock,
+                new TextBlock { Text = "Select Mood:", HorizontalAlignment= HorizontalAlignment.Center, Margin = new Thickness(0, 5, 0, 5)},
+                _moodSelectionPanel, // Add mood panel here
                 _errorMessageTextBlock,
                 buttonPanel
             }
@@ -99,6 +112,8 @@ public sealed class NewJournalDialog : Window
 
     private void OnDataContextChangedHandler(object? sender, EventArgs e)
     {
+        // Clear previous state and unsubscribe
+        _moodSelectionPanel.Children.Clear();
         if (_viewModel != null)
         {
             _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
@@ -112,7 +127,29 @@ public sealed class NewJournalDialog : Window
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
             _confirmCommandInstance = _viewModel.ConfirmCommand;
 
-            // Initialize view state from VM
+            // Populate Mood RadioButtons
+            string? currentVmSelection = _viewModel.SelectedMoodEmoji;
+            int index = 0;
+            foreach (string mood in _viewModel.AvailableMoods)
+            {
+                var radioButton = new RadioButton
+                {
+                    Content = mood,
+                    GroupName = "MoodGroup",
+                    FontSize = 18, // Make emojis bigger
+                    Tag = mood // Store the mood string in the Tag
+                };
+                radioButton.Checked += MoodRadioButton_Checked;
+                // Set initial checked state based on ViewModel
+                if (mood == currentVmSelection)
+                {
+                    radioButton.IsChecked = true;
+                }
+                _moodSelectionPanel.Children.Add(radioButton);
+                index++;
+            }
+
+            // Initialize other view state from VM
             _datePicker.SelectedDate = _viewModel.SelectedDate;
             UpdatePersianDateText(_viewModel.PersianDateString);
             UpdateErrorMessage(_viewModel.ErrorMessage);
@@ -120,11 +157,19 @@ public sealed class NewJournalDialog : Window
         }
         else
         {
-            // Clear view state if VM is null
             _datePicker.SelectedDate = null;
             UpdatePersianDateText(null);
             UpdateErrorMessage(null);
             UpdateConfirmButtonState();
+        }
+    }
+
+    // Update ViewModel when a mood RadioButton is checked
+    private void MoodRadioButton_Checked(object? sender, RoutedEventArgs e)
+    {
+        if (_viewModel != null && sender is RadioButton rb && rb.IsChecked == true && rb.Tag is string mood)
+        {
+            _viewModel.SelectedMoodEmoji = mood;
         }
     }
 
@@ -135,15 +180,26 @@ public sealed class NewJournalDialog : Window
         switch (e.PropertyName)
         {
             case nameof(NewJournalDialogViewModel.SelectedDate):
-                // Update DatePicker if changed from VM side (less common)
                 if (_datePicker.SelectedDate != _viewModel.SelectedDate)
                 {
                     _datePicker.SelectedDate = _viewModel.SelectedDate;
                 }
-                UpdateConfirmButtonState(); // CanExecute depends on SelectedDate
+                UpdateConfirmButtonState();
                 break;
             case nameof(NewJournalDialogViewModel.PersianDateString):
                 UpdatePersianDateText(_viewModel.PersianDateString);
+                break;
+            case nameof(NewJournalDialogViewModel.SelectedMoodEmoji):
+                // Sync RadioButton state if VM changes mood (less common)
+                string? vmMood = _viewModel.SelectedMoodEmoji;
+                foreach (var rb in _moodSelectionPanel.Children.OfType<RadioButton>())
+                {
+                    if (rb.Tag is string rbMood)
+                    {
+                        rb.IsChecked = (rbMood == vmMood);
+                    }
+                }
+                UpdateConfirmButtonState();
                 break;
             case nameof(NewJournalDialogViewModel.ErrorMessage):
                 UpdateErrorMessage(_viewModel.ErrorMessage);
@@ -157,13 +213,12 @@ public sealed class NewJournalDialog : Window
         {
             _confirmCommandInstance.Execute(null);
 
-            // Check if the command execution resulted in an error message
             if (string.IsNullOrEmpty(_viewModel?.ErrorMessage))
             {
-                SelectedDate = _viewModel!.ConfirmedDate; // Get confirmed date from VM
-                CloseDialog(true); // Close indicating success
+                SelectedDate = _viewModel!.ConfirmedDate;
+                SelectedMood = _viewModel!.ConfirmedMoodEmoji; // Get confirmed mood
+                CloseDialog(true);
             }
-            // If ErrorMessage is set, dialog stays open
         }
     }
 
@@ -185,7 +240,7 @@ public sealed class NewJournalDialog : Window
     private void CloseDialog(bool success)
     {
         IsConfirmed = success;
-        Close(success); // Pass result to ShowDialogAsync
+        Close(success);
     }
 
     protected override void OnClosed(EventArgs e)
