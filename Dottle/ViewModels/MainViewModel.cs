@@ -13,11 +13,10 @@ namespace Dottle.ViewModels;
 public partial class MainViewModel : ViewModelBase
 {
     private readonly JournalService _journalService;
-    private string _password;
+    private string _password; // Keep internal track of the current valid password
 
-    // Replaced JournalGroups with a flattened list for the ListBox
     [ObservableProperty]
-    private ObservableCollection<object> _displayItems = new();
+    private ObservableCollection<JournalGroupViewModel> _journalGroups = new();
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsJournalSelected))]
@@ -29,7 +28,7 @@ public partial class MainViewModel : ViewModelBase
     private string? _currentJournalContent;
 
     [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(SaveJournalCommand))]
+    [NotifyCanExecuteChangedFor(nameof(SaveJournalCommand))] // Saving should wait for loading
     private bool _isLoadingContent;
 
     [ObservableProperty]
@@ -39,10 +38,7 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private string? _statusBarText;
 
-    [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(CreateNewJournalCommand))]
-    private string? _newJournalDateString;
-
+    // Properties specifically for the change password operation, set via dialog interaction
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
     private string? _currentPasswordForChange;
@@ -53,7 +49,7 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
-    private string? _confirmNewPassword;
+    private string? _confirmNewPassword; // Still needed for CanExecute
 
     [ObservableProperty]
     private string? _changePasswordErrorMessage;
@@ -68,21 +64,12 @@ public partial class MainViewModel : ViewModelBase
     {
         _journalService = journalService;
         _password = password;
-        _newJournalDateString = PersianCalendarHelper.GetCurrentPersianDateString();
         LoadJournalList();
         UpdateStatusBar($"Journals loaded. Directory: {_journalService.GetJournalDirectoryPath()}");
     }
 
     partial void OnSelectedJournalChanged(JournalViewModel? value)
     {
-        if (value == null)
-        {
-            CurrentJournalContent = string.Empty;
-            UpdateStatusBar("No journal selected.");
-            SaveJournalCommand.NotifyCanExecuteChanged();
-            return;
-        }
-        // Only load if the selected item is actually a JournalViewModel
         LoadSelectedJournalContent();
     }
 
@@ -91,33 +78,16 @@ public partial class MainViewModel : ViewModelBase
         var entries = _journalService.GetJournalEntries();
         var viewModels = entries.Select(e => new JournalViewModel(e)).ToList();
 
-        var grouped = viewModels
+        var groups = viewModels
             .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date))
-            .OrderByDescending(g => g.Key);
+            .Select(g => new JournalGroupViewModel(g.Key, g.ToList()))
+            .OrderByDescending(g => g.Year);
 
-        var newDisplayItems = new ObservableCollection<object>();
-        foreach (var group in grouped)
-        {
-            newDisplayItems.Add(group.Key); // Add year header (int)
-            foreach (var journalVm in group.OrderByDescending(j => j.Date))
-            {
-                newDisplayItems.Add(journalVm); // Add journal items
-            }
-        }
+        JournalGroups = new ObservableCollection<JournalGroupViewModel>(groups);
 
-        DisplayItems = newDisplayItems; // Replace the collection
-
-        // Check if the previously selected item still exists in the new list
-        if (SelectedJournal != null && !DisplayItems.OfType<JournalViewModel>().Any(j => j.FileName == SelectedJournal.FileName))
-        {
-            SelectedJournal = null; // Deselect if the item is gone
-        }
-        else if (SelectedJournal == null)
-        {
-            CurrentJournalContent = string.Empty;
-        }
-        // If SelectedJournal exists, it remains selected.
-
+        // Reset selection and content when list reloads
+        SelectedJournal = null;
+        CurrentJournalContent = string.Empty;
         UpdateStatusBar("Journal list refreshed.");
     }
 
@@ -130,15 +100,15 @@ public partial class MainViewModel : ViewModelBase
         }
 
         IsLoadingContent = true;
-        CurrentJournalContent = string.Empty;
-        SaveJournalCommand.NotifyCanExecuteChanged();
+        CurrentJournalContent = string.Empty; // Clear previous content
         UpdateStatusBar($"Loading {SelectedJournal.DisplayName}...");
+        // Provide visual feedback by delaying slightly
         await Task.Delay(50);
 
-        string? content = await Task.Run(() =>
+        string? content = await Task.Run(() => // Run potentially blocking file IO/decryption on background thread
             _journalService.ReadJournalContent(SelectedJournal.FileName, _password));
 
-        IsLoadingContent = false;
+        IsLoadingContent = false; // Set loading false *before* updating content
 
         if (content != null)
         {
@@ -147,14 +117,18 @@ public partial class MainViewModel : ViewModelBase
         }
         else
         {
+            // Provide more specific feedback if possible (e.g., differentiate file not found from decryption error)
+            // For now, use a generic error.
             CurrentJournalContent = $"Error: Could not load or decrypt '{SelectedJournal.FileName}'. Check password or file integrity.";
             UpdateStatusBar($"Error loading {SelectedJournal.DisplayName}.");
         }
+        // Explicitly trigger CanExecuteChanged for Save command after content load attempt
         SaveJournalCommand.NotifyCanExecuteChanged();
     }
 
     private bool CanSaveJournal()
     {
+        // Can save if a journal is selected, content isn't null, and not currently loading or saving
         return SelectedJournal != null &&
                CurrentJournalContent != null &&
                !IsLoadingContent &&
@@ -164,17 +138,17 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand(CanExecute = nameof(CanSaveJournal))]
     private async Task SaveJournal()
     {
-        if (SelectedJournal == null || CurrentJournalContent == null) return;
+        if (SelectedJournal == null || CurrentJournalContent == null) return; // Should be prevented by CanExecute
 
         IsSavingContent = true;
         UpdateStatusBar($"Saving {SelectedJournal.DisplayName}...");
-        SaveJournalCommand.NotifyCanExecuteChanged();
-        await Task.Delay(50);
+        await Task.Delay(50); // Brief delay for visual feedback
 
+        // Run potentially blocking file IO/encryption on background thread
         bool success = await Task.Run(() =>
             _journalService.SaveJournalContent(SelectedJournal.FileName, CurrentJournalContent, _password));
 
-        IsSavingContent = false;
+        IsSavingContent = false; // Update state before status bar
 
         if (success)
         {
@@ -184,83 +158,70 @@ public partial class MainViewModel : ViewModelBase
         {
             UpdateStatusBar($"Error: Failed to save {SelectedJournal.DisplayName}.");
         }
+        // Explicitly trigger CanExecuteChanged after save attempt
         SaveJournalCommand.NotifyCanExecuteChanged();
     }
 
     [RelayCommand]
-    private async Task CreateNewJournal()
+    private async Task CreateNewJournal() // Made async for consistency, though IO is quick
     {
-        DateTime dateToCreate;
-        string dateString;
+        DateTime today = DateTime.Now;
+        string dateString = PersianCalendarHelper.GetPersianDateString(today);
+        UpdateStatusBar($"Creating journal for {dateString}...");
 
-        if (string.IsNullOrWhiteSpace(NewJournalDateString) || !PersianCalendarHelper.TryParsePersianDateString(NewJournalDateString, out dateToCreate))
-        {
-            UpdateStatusBar($"Invalid date format in input box. Using today's date.");
-            dateToCreate = DateTime.Now;
-            dateString = PersianCalendarHelper.GetPersianDateString(dateToCreate);
-            NewJournalDateString = dateString;
-        }
-        else
-        {
-            dateString = NewJournalDateString;
-        }
-
-        UpdateStatusBar($"Attempting to create journal for {dateString}...");
-
-        string? newFileName = await Task.Run(() =>
-            _journalService.CreateNewJournal(dateToCreate, _password));
+        string? newFileName = await Task.Run(() => // Run file IO on background thread
+            _journalService.CreateNewJournal(today, _password));
 
         if (newFileName != null)
         {
-            UpdateStatusBar($"Journal created: {newFileName}. Reloading list...");
-            LoadJournalList(); // Reload the flattened list
-            await Task.Delay(50);
-
+            LoadJournalList(); // Reload the list to include the new entry
+            // Find and select the newly created entry
             var newEntryVm = FindJournalViewModelByFileName(newFileName);
-            if (newEntryVm != null)
-            {
-                SelectedJournal = newEntryVm;
-                UpdateStatusBar($"Created and selected journal for {dateString}.");
-            }
-            else
-            {
-                UpdateStatusBar($"Created journal {newFileName}, but could not auto-select it.");
-            }
+            SelectedJournal = newEntryVm; // This will trigger content load automatically
+            UpdateStatusBar($"Created and selected journal for {dateString}.");
         }
         else
         {
-            string existingFileName = $"{dateString}.txt";
             UpdateStatusBar($"Journal for {dateString} already exists or could not be created.");
+            // Optionally select the existing entry if creation failed because it exists
+            string existingFileName = $"{dateString}.txt";
+            var existingEntryVm = FindJournalViewModelByFileName(existingFileName);
+            if (existingEntryVm != null && SelectedJournal != existingEntryVm)
+            {
+                SelectedJournal = existingEntryVm; // Select existing if not already selected
+            }
         }
     }
 
     private JournalViewModel? FindJournalViewModelByFileName(string fileName)
     {
-        // Search the flattened list for the specific JournalViewModel
-        return DisplayItems
-            .OfType<JournalViewModel>()
+        return JournalGroups
+            .SelectMany(group => group.Journals)
             .FirstOrDefault(j => j.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase));
     }
 
     private void UpdateStatusBar(string message)
     {
+        // Prepend timestamp for clarity
         StatusBarText = $"{DateTime.Now:HH:mm:ss} - {message}";
     }
 
     private bool CanChangePassword()
     {
+        // Check if all required passwords are provided and match rules
         return !string.IsNullOrEmpty(CurrentPasswordForChange) &&
                !string.IsNullOrEmpty(NewPassword) &&
-               NewPassword == ConfirmNewPassword &&
-               NewPassword != CurrentPasswordForChange &&
-               !IsChangingPassword;
+               NewPassword == ConfirmNewPassword && // New passwords must match
+               NewPassword != CurrentPasswordForChange && // New must be different from old
+               !IsChangingPassword; // Don't allow execution if already in progress
     }
 
     [RelayCommand(CanExecute = nameof(CanChangePassword))]
     private async Task ChangePassword()
     {
-        ChangePasswordErrorMessage = null;
+        ChangePasswordErrorMessage = null; // Clear previous error
 
+        // Perform final validation checks here, even though dialog might do some
         if (CurrentPasswordForChange != _password)
         {
             ChangePasswordErrorMessage = "The Current Password provided does not match the active password.";
@@ -268,6 +229,7 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        // These checks are redundant if CanExecute works correctly, but good defense
         if (string.IsNullOrEmpty(NewPassword) || NewPassword != ConfirmNewPassword)
         {
             ChangePasswordErrorMessage = "New passwords do not match or are empty.";
@@ -282,30 +244,33 @@ public partial class MainViewModel : ViewModelBase
         }
 
         IsChangingPassword = true;
-        ChangePasswordCommand.NotifyCanExecuteChanged();
         UpdateStatusBar("Changing password and re-encrypting all journals... Please wait.");
-        await Task.Delay(50);
+        await Task.Delay(50); // UI feedback delay
 
+        // Execute the potentially long-running operation on a background thread
         bool success = await Task.Run(() =>
             _journalService.ChangeEncryptionPassword(_password, NewPassword!));
 
-        IsChangingPassword = false;
+        IsChangingPassword = false; // Update state first
 
         if (success)
         {
-            _password = NewPassword!;
-            CurrentPasswordForChange = null;
+            _password = NewPassword!; // IMPORTANT: Update the internally stored password
+            CurrentPasswordForChange = null; // Clear sensitive fields after use
             NewPassword = null;
             ConfirmNewPassword = null;
-            ChangePasswordErrorMessage = null;
+            ChangePasswordErrorMessage = null; // Clear any previous error message
             UpdateStatusBar("Password changed successfully. All journals re-encrypted.");
+            // Optionally reload current journal if one is selected, as its content is now encrypted with new password
             if (SelectedJournal is not null) LoadSelectedJournalContent();
         }
         else
         {
+            // Don't clear the input fields on failure, user might want to retry
             ChangePasswordErrorMessage = "Critical Error: Failed to re-encrypt one or more journals. Password has NOT been changed.";
             UpdateStatusBar("Error changing password. See error message. Password remains unchanged.");
         }
+        // Explicitly notify CanExecute changed as IsChangingPassword has changed
         ChangePasswordCommand.NotifyCanExecuteChanged();
     }
 }

@@ -6,13 +6,12 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.VisualTree;
 using Dottle.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
-using System.Threading.Tasks;
+using System.Threading.Tasks; // Added for async dialog showing
 using System.Windows.Input;
 
 namespace Dottle.Views;
@@ -24,22 +23,23 @@ public sealed class MainView : UserControl
     private readonly TextBlock _statusBarTextBlock;
     private readonly Button _saveButton;
     private readonly Button _newButton;
-    private readonly TextBox _newJournalDateTextBox;
     private readonly Menu _menuBar;
 
     private MainViewModel? _viewModel;
     private ICommand? _createNewJournalCommand;
     private ICommand? _saveJournalCommand;
+    // No need to store ChangePassword command here, it's triggered indirectly
+
     private bool _isSyncingSelection = false;
     private bool _isSyncingText = false;
-    private bool _isSyncingDateText = false;
 
     public MainView()
     {
         this.DataContextChanged += OnDataContextChangedHandler;
 
+        // --- Menu Bar ---
         var changePasswordMenuItem = new MenuItem { Header = "Change Password..." };
-        changePasswordMenuItem.Click += ChangePasswordMenuItem_Click;
+        changePasswordMenuItem.Click += ChangePasswordMenuItem_Click; // Assign click handler
 
         var securityMenu = new MenuItem
         {
@@ -53,20 +53,12 @@ public sealed class MainView : UserControl
         };
         DockPanel.SetDock(_menuBar, Dock.Top);
 
-        _newJournalDateTextBox = new TextBox
-        {
-            Watermark = "YYYY-MM-DD",
-            Margin = new Thickness(5, 5, 5, 0),
-            HorizontalAlignment = HorizontalAlignment.Stretch
-        };
-        DockPanel.SetDock(_newJournalDateTextBox, Dock.Top);
-        _newJournalDateTextBox.TextChanged += NewJournalDateTextBox_TextChanged;
-
+        // --- Left Panel Components ---
         _newButton = new Button
         {
             Content = "New Journal",
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            Margin = new Thickness(5, 5, 5, 5),
+            Margin = new Thickness(5),
             IsEnabled = false
         };
         DockPanel.SetDock(_newButton, Dock.Top);
@@ -75,32 +67,21 @@ public sealed class MainView : UserControl
         _journalListBox = new ListBox
         {
             Background = Brushes.Transparent,
-            ItemTemplate = CreateFlattenedJournalTemplate()
+            ItemTemplate = JournalDataTemplate()
         };
         _journalListBox.SelectionChanged += JournalListBox_SelectionChanged;
 
         var journalListScrollViewer = new ScrollViewer { Content = _journalListBox };
-
-        var leftDockPanel = new DockPanel
-        {
-            Children =
-            {
-                _newJournalDateTextBox,
-                _newButton,
-                journalListScrollViewer
-            }
-        };
-
+        var leftDockPanel = new DockPanel { Children = { _newButton, journalListScrollViewer } };
         var leftBorder = new Border
         {
             BorderBrush = SolidColorBrush.Parse("#444"),
             BorderThickness = new Thickness(0, 0, 1, 0),
-            Child = leftDockPanel,
-            MinWidth = 150
+            Child = leftDockPanel
         };
-        Grid.SetColumn(leftBorder, 0);
-        Grid.SetRow(leftBorder, 0);
+        Grid.SetColumn(leftBorder, 0); Grid.SetRow(leftBorder, 0);
 
+        // --- Right Panel Components ---
         _saveButton = new Button
         {
             Content = "Save Journal",
@@ -123,20 +104,19 @@ public sealed class MainView : UserControl
             VerticalAlignment = VerticalAlignment.Stretch,
             HorizontalAlignment = HorizontalAlignment.Stretch,
             IsEnabled = false,
-            IsReadOnly = false
+            IsReadOnly = false // Start as editable, disable based on state
         };
         _editorTextBox.TextChanged += EditorTextBox_TextChanged;
 
         var rightDockPanel = new DockPanel { Children = { _saveButton, _editorTextBox } };
-        Grid.SetColumn(rightDockPanel, 1);
-        Grid.SetRow(rightDockPanel, 0);
+        Grid.SetColumn(rightDockPanel, 1); Grid.SetRow(rightDockPanel, 0);
 
+        // --- Status Bar Components ---
         _statusBarTextBlock = new TextBlock
         {
             FontSize = 11,
             VerticalAlignment = VerticalAlignment.Center
         };
-
         var bottomBorder = new Border
         {
             Background = SolidColorBrush.Parse("#2a2a2a"),
@@ -145,10 +125,9 @@ public sealed class MainView : UserControl
             Padding = new Thickness(5, 3),
             Child = _statusBarTextBlock
         };
-        Grid.SetColumn(bottomBorder, 0);
-        Grid.SetRow(bottomBorder, 1);
-        Grid.SetColumnSpan(bottomBorder, 2);
+        Grid.SetColumn(bottomBorder, 0); Grid.SetRow(bottomBorder, 1); Grid.SetColumnSpan(bottomBorder, 2);
 
+        // --- Top Level Container ---
         var mainDockPanel = new DockPanel();
         mainDockPanel.Children.Add(_menuBar);
 
@@ -161,18 +140,6 @@ public sealed class MainView : UserControl
         mainDockPanel.Children.Add(contentGrid);
 
         Content = mainDockPanel;
-    }
-
-    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
-    {
-        base.OnDetachedFromVisualTree(e);
-        if (_viewModel != null)
-        {
-            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
-        }
-        _viewModel = null;
-        _createNewJournalCommand = null;
-        _saveJournalCommand = null;
     }
 
     private void OnDataContextChangedHandler(object? sender, EventArgs e)
@@ -192,10 +159,9 @@ public sealed class MainView : UserControl
             _createNewJournalCommand = _viewModel.CreateNewJournalCommand;
             _saveJournalCommand = _viewModel.SaveJournalCommand;
 
-            UpdateJournalList(_viewModel.DisplayItems);
+            UpdateJournalList(_viewModel.JournalGroups);
             UpdateEditorText(_viewModel.CurrentJournalContent);
             UpdateSelectedItem(_viewModel.SelectedJournal);
-            UpdateNewJournalDateText(_viewModel.NewJournalDateString);
             UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
             UpdateStatusBar(_viewModel.StatusBarText);
             UpdateNewButtonState();
@@ -205,43 +171,34 @@ public sealed class MainView : UserControl
         {
             UpdateJournalList(null);
             UpdateEditorText(null);
-            UpdateNewJournalDateText(null);
             UpdateEditorState(false, false);
             UpdateStatusBar(null);
             UpdateNewButtonState();
             UpdateSaveButtonState();
-            _journalListBox.SelectedItem = null;
-            _editorTextBox.Text = null;
-            _newJournalDateTextBox.Text = null;
         }
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (_viewModel == null)
-        {
-            return;
-        }
+        if (_viewModel == null) return;
 
         switch (e.PropertyName)
         {
-            case nameof(MainViewModel.DisplayItems):
-                UpdateJournalList(_viewModel.DisplayItems);
+            case nameof(MainViewModel.JournalGroups):
+                UpdateJournalList(_viewModel.JournalGroups);
                 break;
             case nameof(MainViewModel.SelectedJournal):
                 UpdateSelectedItem(_viewModel.SelectedJournal);
                 UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
+                UpdateSaveButtonState();
+                UpdateEditorText(_viewModel.CurrentJournalContent);
                 break;
             case nameof(MainViewModel.CurrentJournalContent):
                 UpdateEditorText(_viewModel.CurrentJournalContent);
                 UpdateSaveButtonState();
                 break;
-            case nameof(MainViewModel.NewJournalDateString):
-                UpdateNewJournalDateText(_viewModel.NewJournalDateString);
-                break;
             case nameof(MainViewModel.IsLoadingContent):
                 UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
-                UpdateSaveButtonState();
                 break;
             case nameof(MainViewModel.IsSavingContent):
                 UpdateSaveButtonState();
@@ -249,33 +206,95 @@ public sealed class MainView : UserControl
             case nameof(MainViewModel.StatusBarText):
                 UpdateStatusBar(_viewModel.StatusBarText);
                 break;
-            case nameof(MainViewModel.IsChangingPassword):
+            case nameof(MainViewModel.IsChangingPassword): // Update relevant UI if needed
+                // Maybe disable the 'Change Password' menu item while processing?
                 break;
-            case nameof(MainViewModel.ChangePasswordErrorMessage):
+            case nameof(MainViewModel.ChangePasswordErrorMessage): // Display errors from main VM
+                if (!string.IsNullOrEmpty(_viewModel.ChangePasswordErrorMessage))
+                {
+                    // Optionally show this in a more prominent way, e.g., temporary status bar message
+                    // Or rely on the status bar text already being updated by the command
+                }
                 break;
         }
     }
 
-    private void UpdateJournalList(IEnumerable<object>? items)
+    private void JournalListBox_SelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        var currentSelection = _journalListBox.SelectedItem;
-        _journalListBox.ItemsSource = items;
+        if (_viewModel == null || _isSyncingSelection) return;
 
-        if (currentSelection != null && items?.Contains(currentSelection) == true)
+        _viewModel.SelectedJournal = _journalListBox.SelectedItem as JournalViewModel;
+    }
+
+    private void EditorTextBox_TextChanged(object? sender, TextChangedEventArgs e)
+    {
+        if (_viewModel == null || _isSyncingText) return;
+
+        _viewModel.CurrentJournalContent = _editorTextBox.Text;
+    }
+
+    private void NewButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _createNewJournalCommand?.Execute(null);
+    }
+
+    private void SaveButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _saveJournalCommand?.Execute(null);
+    }
+
+    private async void ChangePasswordMenuItem_Click(object? sender, RoutedEventArgs e)
+    {
+        if (_viewModel == null) return;
+
+        var dialogViewModel = new ChangePasswordDialogViewModel(async (oldPass, newPass) =>
         {
-            _isSyncingSelection = true;
-            _journalListBox.SelectedItem = currentSelection;
-            _isSyncingSelection = false;
+            // This delegate doesn't run the command directly,
+            // it's just here to satisfy the constructor.
+            // The real work happens after the dialog closes.
+            await Task.CompletedTask;
+            return true; // Placeholder
+        });
+
+        var dialog = new ChangePasswordDialog
+        {
+            DataContext = dialogViewModel
+        };
+
+        if (this.VisualRoot is not Window owner) return;
+
+        var dialogResult = await dialog.ShowDialog<bool>(owner);
+
+        if (dialogResult && dialog.IsConfirmed && _viewModel != null && dialogViewModel != null) // Check IsConfirmed and VM null states
+        {
+            // Transfer confirmed passwords to MainViewModel properties
+            _viewModel.CurrentPasswordForChange = dialogViewModel.OldPassword;
+            _viewModel.NewPassword = dialogViewModel.NewPassword;
+            _viewModel.ConfirmNewPassword = dialogViewModel.ConfirmNewPassword; // Needed for CanExecute
+
+            // Now execute the command on MainViewModel
+            if (_viewModel.ChangePasswordCommand.CanExecute(null))
+            {
+                // The command is async, but we don't necessarily need to await it here
+                // as it updates the UI (status bar, IsChangingPassword) via bindings.
+                _ = _viewModel.ChangePasswordCommand.ExecuteAsync(null);
+            }
+            else
+            {
+                // This case shouldn't normally happen if dialog validation is correct,
+                // but handle defensively. Maybe update status bar?
+                UpdateStatusBar("Could not initiate password change.");
+            }
         }
-        else if (_viewModel?.SelectedJournal != null && items != null)
+    }
+
+
+    private void UpdateJournalList(IEnumerable<JournalGroupViewModel>? groups)
+    {
+        _journalListBox.ItemsSource = groups;
+        if (_viewModel?.SelectedJournal == null)
         {
-            UpdateSelectedItem(_viewModel.SelectedJournal);
-        }
-        else
-        {
-            _isSyncingSelection = true;
-            _journalListBox.SelectedItem = null;
-            _isSyncingSelection = false;
+            UpdateSelectedItem(null);
         }
     }
 
@@ -288,12 +307,10 @@ public sealed class MainView : UserControl
         {
             if (!object.Equals(_journalListBox.SelectedItem, selectedJournalVm))
             {
-                var itemToSelect = _viewModel?.DisplayItems?.FirstOrDefault(item => item == selectedJournalVm);
-
-                _journalListBox.SelectedItem = itemToSelect;
-                if (itemToSelect != null)
+                _journalListBox.SelectedItem = selectedJournalVm;
+                if (selectedJournalVm != null)
                 {
-                    _journalListBox.ScrollIntoView(itemToSelect);
+                    _journalListBox.ScrollIntoView(selectedJournalVm);
                 }
             }
         }
@@ -323,37 +340,10 @@ public sealed class MainView : UserControl
         }
     }
 
-    private void UpdateNewJournalDateText(string? text)
-    {
-        if (_isSyncingDateText) return;
-
-        _isSyncingDateText = true;
-        try
-        {
-            var currentText = _newJournalDateTextBox.Text ?? string.Empty;
-            var newText = text ?? string.Empty;
-            if (currentText != newText)
-            {
-                _newJournalDateTextBox.Text = newText;
-            }
-        }
-        finally
-        {
-            _isSyncingDateText = false;
-        }
-    }
-
     private void UpdateEditorState(bool isEnabled, bool isLoading)
     {
-        bool shouldBeEnabled = isEnabled && !isLoading;
-        if (_editorTextBox.IsEnabled != shouldBeEnabled)
-        {
-            _editorTextBox.IsEnabled = shouldBeEnabled;
-        }
-        if (_editorTextBox.IsReadOnly != isLoading)
-        {
-            _editorTextBox.IsReadOnly = isLoading;
-        }
+        _editorTextBox.IsEnabled = isEnabled && !isLoading;
+        _editorTextBox.IsReadOnly = isLoading; // Make read-only while loading
     }
 
     private void UpdateStatusBar(string? text)
@@ -368,140 +358,64 @@ public sealed class MainView : UserControl
 
     private void UpdateSaveButtonState()
     {
-        bool canSaveCommand = _saveJournalCommand?.CanExecute(null) ?? false;
-        _saveButton.IsEnabled = canSaveCommand;
+        bool canSave = _saveJournalCommand?.CanExecute(null) ?? false;
+        _saveButton.IsEnabled = canSave && _editorTextBox.IsEnabled; // Also consider if editor is enabled
     }
 
-    private static IDataTemplate CreateFlattenedJournalTemplate()
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
-        return new FuncDataTemplate<object>(
-            (data, ns) =>
+        base.OnDetachedFromVisualTree(e);
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        }
+        _viewModel = null;
+        _createNewJournalCommand = null;
+        _saveJournalCommand = null;
+    }
+
+    private static IDataTemplate JournalDataTemplate()
+    {
+        return new FuncDataTemplate<object>((data, ns) =>
+        {
+            if (data is JournalGroupViewModel groupVm)
             {
-                if (data is int year)
+                var itemsControl = new ItemsControl
                 {
-                    return CreateYearHeaderControl(year);
-                }
-                if (data is JournalViewModel journalVm)
+                    ItemsSource = groupVm.Journals,
+                    ItemTemplate = JournalItemTemplate()
+                };
+
+                return new StackPanel
                 {
-                    return CreateJournalItemControl(journalVm);
-                }
-                return new TextBlock { Text = $"Unknown data type: {data?.GetType().Name ?? "null"}" };
+                    Spacing = 4,
+                    Margin = new Thickness(5, 8, 5, 4),
+                    Children =
+                    {
+                        new TextBlock
+                        {
+                            Text = groupVm.Year.ToString(),
+                            FontSize = 16,
+                            FontWeight = FontWeight.Bold,
+                            Margin = new Thickness(0, 0, 0, 5)
+                        },
+                        itemsControl
+                    }
+                };
+            }
+            return new TextBlock { Text = "Invalid item type in ListBox" };
+        }, supportsRecycling: true);
+    }
+
+    private static IDataTemplate JournalItemTemplate()
+    {
+        return new FuncDataTemplate<JournalViewModel>((journalVm, ns) =>
+            new TextBlock
+            {
+                Text = journalVm.DisplayName,
+                Padding = new Thickness(15, 3, 5, 3),
+                HorizontalAlignment = HorizontalAlignment.Stretch
             },
-            supportsRecycling: true,
-            match: data => data is JournalViewModel || data is int
-        );
-    }
-
-    private static Control CreateYearHeaderControl(int year)
-    {
-        return new TextBlock
-        {
-            Text = year.ToString(),
-            FontSize = 16,
-            FontWeight = FontWeight.Bold,
-            Margin = new Thickness(5, 8, 5, 5),
-            Padding = new Thickness(0, 3, 0, 3),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Focusable = false,
-            IsHitTestVisible = false
-        };
-    }
-
-    private static Control CreateJournalItemControl(JournalViewModel journalVm)
-    {
-        return new TextBlock
-        {
-            Text = journalVm.DisplayName,
-            Padding = new Thickness(15, 3, 5, 3),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Focusable = true
-        };
-    }
-
-    private void JournalListBox_SelectionChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        if (_viewModel == null || _isSyncingSelection)
-        {
-            return;
-        }
-
-        if (_journalListBox.SelectedItem is JournalViewModel selectedJournalVm)
-        {
-            _viewModel.SelectedJournal = selectedJournalVm;
-        }
-        else if (_journalListBox.SelectedItem == null)
-        {
-            _viewModel.SelectedJournal = null;
-        }
-    }
-
-    private void EditorTextBox_TextChanged(object? sender, TextChangedEventArgs e)
-    {
-        if (_viewModel == null || _isSyncingText)
-        {
-            return;
-        }
-        _viewModel.CurrentJournalContent = _editorTextBox.Text;
-    }
-
-    private void NewJournalDateTextBox_TextChanged(object? sender, TextChangedEventArgs e)
-    {
-        if (_viewModel == null || _isSyncingDateText)
-        {
-            return;
-        }
-        _viewModel.NewJournalDateString = _newJournalDateTextBox.Text;
-    }
-
-    private void NewButton_Click(object? sender, RoutedEventArgs e)
-    {
-        _createNewJournalCommand?.Execute(null);
-    }
-
-    private void SaveButton_Click(object? sender, RoutedEventArgs e)
-    {
-        _saveJournalCommand?.Execute(null);
-    }
-
-    private async void ChangePasswordMenuItem_Click(object? sender, RoutedEventArgs e)
-    {
-        if (_viewModel == null)
-        {
-            return;
-        }
-
-        var dialogViewModel = new ChangePasswordDialogViewModel(async (oldPass, newPass) =>
-        {
-            await Task.CompletedTask;
-            return true;
-        });
-
-        var dialog = new ChangePasswordDialog
-        {
-            DataContext = dialogViewModel
-        };
-
-        if (this.GetVisualRoot() is not Window owner)
-        {
-            return;
-        }
-
-        var dialogResult = await dialog.ShowDialog<bool>(owner);
-
-        if (dialogResult && dialog.IsConfirmed && dialogViewModel != null)
-        {
-            _viewModel.CurrentPasswordForChange = dialogViewModel.OldPassword;
-            _viewModel.NewPassword = dialogViewModel.NewPassword;
-            _viewModel.ConfirmNewPassword = dialogViewModel.ConfirmNewPassword;
-
-            if (_viewModel.ChangePasswordCommand.CanExecute(null))
-            {
-                _ = _viewModel.ChangePasswordCommand.ExecuteAsync(null);
-            }
-            else
-            {
-                UpdateStatusBar("Could not initiate password change. Pre-conditions not met.");
-            }
-        }
+            supportsRecycling: true);
     }
 }
