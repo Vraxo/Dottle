@@ -27,7 +27,7 @@ public class App : Application
         Styles.Add(new FluentTheme()); // Add FluentTheme instance
 
         // Set the desired theme variant AFTER adding the theme
-        RequestedThemeVariant = ThemeVariant;
+        RequestedThemeVariant = ThemeVariant.Dark;
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
