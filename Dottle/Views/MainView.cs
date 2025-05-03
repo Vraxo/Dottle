@@ -6,7 +6,8 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.VisualTree; // Required for FindAncestorOfType
+using Avalonia.Threading; // Required for Dispatcher
+using Avalonia.VisualTree; // Required for FindAncestorOfType, FindDescendantOfType
 using Dottle.ViewModels;
 using System;
 using System.Collections.Generic;
@@ -31,6 +32,7 @@ public sealed class MainView : UserControl
     private ICommand? _saveJournalCommand;
 
     private bool _isSyncingText = false;
+    private ListBoxItem? _currentlySelectedListBoxItem = null; // Track visual selection
 
     public MainView()
     {
@@ -64,9 +66,10 @@ public sealed class MainView : UserControl
         _journalListBox = new ListBox
         {
             Background = Brushes.Transparent,
-            ItemTemplate = JournalDataTemplate() // Use the grouped template
-            // SelectionChanged handler removed - selection handled by PointerPressed on items
+            ItemTemplate = JournalDataTemplate(),
+            SelectionMode = SelectionMode.Single // Explicitly single, though we manage visuals
         };
+        // SelectionChanged handler removed - selection handled by PointerPressed on items
 
         var journalListScrollViewer = new ScrollViewer { Content = _journalListBox };
         var leftDockPanel = new DockPanel { Children = { _newButton, journalListScrollViewer } };
@@ -146,6 +149,7 @@ public sealed class MainView : UserControl
         _viewModel = DataContext as MainViewModel;
         _createNewJournalCommand = null;
         _saveJournalCommand = null;
+        _currentlySelectedListBoxItem = null; // Reset visual selection tracking
 
         if (_viewModel != null)
         {
@@ -155,7 +159,7 @@ public sealed class MainView : UserControl
 
             UpdateJournalList(_viewModel.JournalGroups);
             UpdateEditorText(_viewModel.CurrentJournalContent);
-            // UpdateSelectedItem removed - selection handled differently
+            UpdateVisualSelection(_viewModel.SelectedJournal); // Sync visual selection
             UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
             UpdateStatusBar(_viewModel.StatusBarText);
             UpdateNewButtonState();
@@ -165,6 +169,7 @@ public sealed class MainView : UserControl
         {
             UpdateJournalList(null);
             UpdateEditorText(null);
+            UpdateVisualSelection(null); // Clear visual selection
             UpdateEditorState(false, false);
             UpdateStatusBar(null);
             UpdateNewButtonState();
@@ -180,13 +185,17 @@ public sealed class MainView : UserControl
         {
             case nameof(MainViewModel.JournalGroups):
                 UpdateJournalList(_viewModel.JournalGroups);
+                // Ensure selection visual state is correct after list reload
+                UpdateVisualSelection(_viewModel.SelectedJournal);
                 break;
             case nameof(MainViewModel.SelectedJournal):
-                // UpdateSelectedItem removed - selection handled differently
-                // UI updates based on the new selection
+                // Update the visual selection state of the ListBoxItems
+                UpdateVisualSelection(_viewModel.SelectedJournal);
+                // Update editor state etc. based on the *new* selection
                 UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
                 UpdateSaveButtonState();
-                UpdateEditorText(_viewModel.CurrentJournalContent); // Load content when selection changes
+                // Content loading is triggered by the VM itself, just update editor text display
+                UpdateEditorText(_viewModel.CurrentJournalContent);
                 break;
             case nameof(MainViewModel.CurrentJournalContent):
                 UpdateEditorText(_viewModel.CurrentJournalContent);
@@ -266,11 +275,63 @@ public sealed class MainView : UserControl
 
     private void UpdateJournalList(IEnumerable<JournalGroupViewModel>? groups)
     {
+        // Clear visual selection before updating source to avoid dangling references
+        if (_currentlySelectedListBoxItem != null)
+        {
+            _currentlySelectedListBoxItem.IsSelected = false;
+            _currentlySelectedListBoxItem = null;
+        }
         _journalListBox.ItemsSource = groups;
-        // UpdateSelectedItem(null) call removed
     }
 
-    // Removed UpdateSelectedItem method as ListBox selection isn't used for JournalViewModel
+    private void UpdateVisualSelection(JournalViewModel? newSelection)
+    {
+        // Deselect the previously selected item visually
+        if (_currentlySelectedListBoxItem != null)
+        {
+            _currentlySelectedListBoxItem.IsSelected = false;
+            _currentlySelectedListBoxItem = null;
+        }
+
+        if (newSelection == null || _journalListBox.ItemsSource == null) return;
+
+        // Find and select the new item visually
+        foreach (var group in _journalListBox.ItemsSource.OfType<JournalGroupViewModel>())
+        {
+            var groupContainer = _journalListBox.ContainerFromItem(group) as Control;
+            if (groupContainer == null)
+            {
+                // Try scrolling the group into view if its container isn't realized
+                _journalListBox.ScrollIntoView(group);
+                // We might need to wait for layout, finding the item might fail this pass
+                continue;
+            }
+
+            // Find the nested ItemsControl within the group container's visual tree
+            var nestedItemsControl = groupContainer.FindDescendantOfType<ItemsControl>();
+            if (nestedItemsControl == null) continue;
+
+            // Try finding the container for the specific journal entry
+            var newItemContainer = nestedItemsControl.ContainerFromItem(newSelection) as ListBoxItem;
+
+            if (newItemContainer != null)
+            {
+                newItemContainer.IsSelected = true;
+                _currentlySelectedListBoxItem = newItemContainer;
+                // Ensure the selected item is visible
+                _journalListBox.ScrollIntoView(group); // Ensure group is visible first
+                // Post BringIntoView to run after layout pass potentially triggered by ScrollIntoView
+                Dispatcher.UIThread.Post(() => newItemContainer.BringIntoView(), DispatcherPriority.Background);
+                break; // Found it
+            }
+            else
+            {
+                // If the item container is not found (virtualized?), try scrolling the item into view
+                // This might realize the container for a subsequent update pass.
+                nestedItemsControl.ScrollIntoView(newSelection);
+            }
+        }
+    }
 
     private void UpdateEditorText(string? text)
     {
@@ -324,9 +385,10 @@ public sealed class MainView : UserControl
         _viewModel = null;
         _createNewJournalCommand = null;
         _saveJournalCommand = null;
+        _currentlySelectedListBoxItem = null;
     }
 
-    private static IDataTemplate JournalDataTemplate() // Static ok
+    private static IDataTemplate JournalDataTemplate()
     {
         return new FuncDataTemplate<object>((data, ns) =>
         {
@@ -335,7 +397,9 @@ public sealed class MainView : UserControl
                 var itemsControl = new ItemsControl
                 {
                     ItemsSource = groupVm.Journals,
-                    ItemTemplate = JournalItemTemplate() // Use the item template
+                    ItemTemplate = JournalItemTemplate(), // Use the ListBoxItem template
+                    // Make nested ItemsControl non-focusable itself, items handle focus
+                    Focusable = false
                 };
 
                 return new StackPanel
@@ -350,11 +414,10 @@ public sealed class MainView : UserControl
                             FontSize = 16,
                             FontWeight = FontWeight.Bold,
                             Margin = new Thickness(0, 0, 0, 5),
-                            // Make year header non-clickable visually/functionally if desired
-                            IsEnabled = false,
+                            IsEnabled = false, // Header not interactive
                             Cursor = Cursor.Default
                         },
-                        itemsControl // Contains the clickable journal items
+                        itemsControl
                     }
                 };
             }
@@ -362,36 +425,52 @@ public sealed class MainView : UserControl
         }, supportsRecycling: true);
     }
 
-    private static IDataTemplate JournalItemTemplate() // Static ok
+    private static IDataTemplate JournalItemTemplate()
     {
+        // Template for the content *inside* the ListBoxItem
+        var textBlockTemplate = new FuncDataTemplate<JournalViewModel>((vm, ns) =>
+            new TextBlock
+            {
+                Text = vm.DisplayName,
+                Padding = new Thickness(0), // Let ListBoxItem handle padding if needed
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center
+            }, supportsRecycling: true);
+
+        // Template that creates the ListBoxItem itself
         return new FuncDataTemplate<JournalViewModel>((journalVm, ns) =>
         {
-            var textBlock = new TextBlock
+            var item = new ListBoxItem
             {
-                Text = journalVm.DisplayName,
-                Padding = new Thickness(15, 3, 5, 3), // Indent journal entries
+                DataContext = journalVm,
+                Content = journalVm, // Data for the ContentTemplate
+                ContentTemplate = textBlockTemplate,
+                Padding = new Thickness(15, 3, 5, 3), // Apply padding here for indentation
                 HorizontalAlignment = HorizontalAlignment.Stretch,
-                DataContext = journalVm, // Pass the VM for the handler
-                Cursor = new Cursor(StandardCursorType.Hand) // Indicate clickable
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Hand)
             };
-            // Attach the click handler
-            textBlock.PointerPressed += JournalItem_PointerPressed;
-            return textBlock;
+            item.PointerPressed += JournalItem_PointerPressed;
+            return item;
         },
         supportsRecycling: true);
     }
 
-    // Static handler for clicking on a journal item TextBlock
+    // Static handler for clicking on a journal item ListBoxItem
     private static void JournalItem_PointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (sender is TextBlock { DataContext: JournalViewModel journalVm } textBlock)
+        if (sender is ListBoxItem { DataContext: JournalViewModel journalVm } item)
         {
-            var mainView = textBlock.FindAncestorOfType<MainView>();
+            var mainView = item.FindAncestorOfType<MainView>();
             if (mainView?._viewModel != null)
             {
-                // Set the selected item directly on the ViewModel
-                mainView._viewModel.SelectedJournal = journalVm;
-                e.Handled = true; // Prevent event from bubbling further if needed
+                // Only update ViewModel if selection actually changed
+                if (!ReferenceEquals(mainView._viewModel.SelectedJournal, journalVm))
+                {
+                    mainView._viewModel.SelectedJournal = journalVm;
+                }
+                // Visual update is handled by UpdateVisualSelection via PropertyChanged
+                e.Handled = true;
             }
         }
     }
