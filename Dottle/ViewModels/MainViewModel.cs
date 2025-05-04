@@ -78,19 +78,30 @@ public partial class MainViewModel : ViewModelBase
 
     private void LoadJournalList()
     {
-        var entries = _journalService.GetJournalEntries();
+        var entries = _journalService.GetJournalEntries(); // Already filtered by current year
         var viewModels = entries.Select(e => new JournalViewModel(e)).ToList();
 
         var groups = viewModels
-            .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date))
-            .Select(g => new JournalGroupViewModel(g.Key, g.ToList()))
-            .OrderByDescending(g => g.Year);
+            .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date)) // Group by Year
+            .Select(yearGroup =>
+            {
+                var monthGroups = yearGroup
+                    .GroupBy(jvm => PersianCalendarHelper.GetPersianMonth(jvm.Date)) // Group by Month within Year
+                    .Select(monthGroup => new JournalMonthGroupViewModel(
+                        yearGroup.Key,
+                        monthGroup.Key,
+                        monthGroup.ToList())) // Create Month Group VM
+                    .OrderByDescending(mg => mg.Month); // Order months within the year
+
+                return new JournalGroupViewModel(yearGroup.Key, monthGroups); // Create Year Group VM
+            })
+            .OrderByDescending(g => g.Year); // Order years
 
         JournalGroups = new ObservableCollection<JournalGroupViewModel>(groups);
 
         SelectedJournal = null;
         CurrentJournalContent = string.Empty;
-        UpdateStatusBar("Journal list refreshed.");
+        UpdateStatusBar("Journal list refreshed (Current Year Only).");
     }
 
     private async void LoadSelectedJournalContent()
@@ -212,8 +223,10 @@ public partial class MainViewModel : ViewModelBase
 
     private JournalViewModel? FindJournalViewModelByFileName(string fileName)
     {
+        // Search through the new nested structure: Year -> Month -> Journal
         return JournalGroups
-            .SelectMany(group => group.Journals)
+            .SelectMany(yearGroup => yearGroup.MonthGroups)
+            .SelectMany(monthGroup => monthGroup.Journals)
             .FirstOrDefault(j => j.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase));
     }
 

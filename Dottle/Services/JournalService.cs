@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using Dottle.Models;
 using Dottle.Utils;
+using System.Globalization;
 
 namespace Dottle.Services;
 
@@ -32,16 +33,22 @@ public class JournalService
     {
         var journalEntries = new List<JournalEntry>();
         var files = Directory.EnumerateFiles(_journalDirectory, "*.txt");
+        int currentPersianYear = PersianCalendarHelper.GetPersianYear(DateTime.Now);
 
         foreach (var file in files)
         {
             string fileName = Path.GetFileNameWithoutExtension(file);
             if (PersianCalendarHelper.TryParsePersianDateString(fileName, out DateTime date))
             {
-                journalEntries.Add(new JournalEntry(Path.GetFileName(file), date));
+                // Filter for the current Persian year
+                if (PersianCalendarHelper.GetPersianYear(date) == currentPersianYear)
+                {
+                    journalEntries.Add(new JournalEntry(Path.GetFileName(file), date));
+                }
             }
         }
 
+        // Order by date descending within the current year
         return journalEntries.OrderByDescending(je => je.Date);
     }
 

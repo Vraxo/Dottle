@@ -1,7 +1,5 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using System;
-using System.Threading.Tasks;
 
 namespace Dottle.ViewModels;
 
@@ -23,7 +21,7 @@ public partial class LoginViewModel : ViewModelBase
 
     public LoginViewModel()
     {
-        // Validation logic is handled within the Login command execution.
+
     }
 
     private bool CanLogin()

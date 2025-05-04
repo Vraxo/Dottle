@@ -6,11 +6,15 @@ namespace Dottle.ViewModels;
 public partial class JournalGroupViewModel : ViewModelBase
 {
     public int Year { get; }
-    public ObservableCollection<JournalViewModel> Journals { get; }
+    public ObservableCollection<JournalMonthGroupViewModel> MonthGroups { get; }
 
-    public JournalGroupViewModel(int year, IEnumerable<JournalViewModel> journals)
+    public JournalGroupViewModel(int year, IEnumerable<JournalMonthGroupViewModel> monthGroups)
     {
         Year = year;
-        Journals = new ObservableCollection<JournalViewModel>(journals.OrderByDescending(j => j.Date));
+        // Order months descending (e.g., Esfand before Farvardin)
+        MonthGroups = new ObservableCollection<JournalMonthGroupViewModel>(monthGroups.OrderByDescending(m => m.Month));
     }
+
+    // Display name for the TreeView
+    public string DisplayName => $"{Year} ({MonthGroups.Sum(m => m.Journals.Count)})";
 }

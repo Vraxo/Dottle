@@ -28,6 +28,29 @@ public static partial class PersianCalendarHelper
         return pc.GetYear(dt);
     }
 
+    public static int GetPersianMonth(DateTime dt)
+    {
+        return pc.GetMonth(dt);
+    }
+
+    private static readonly string[] PersianMonthNames =
+    [
+        "", // Index 0 is unused
+        "Farvardin", "Ordibehesht", "Khordad",
+        "Tir", "Mordad", "Shahrivar",
+        "Mehr", "Aban", "Azar",
+        "Dey", "Bahman", "Esfand"
+    ];
+
+    public static string GetPersianMonthName(int month)
+    {
+        if (month >= 1 && month <= 12)
+        {
+            return PersianMonthNames[month];
+        }
+        return "Invalid Month"; // Or throw an exception
+    }
+
     public static bool TryParsePersianDateString(string dateString, out DateTime result)
     {
         result = DateTime.MinValue;

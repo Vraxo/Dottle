@@ -296,11 +296,13 @@ public sealed class MainView : UserControl
             _currentlySelectedListBoxItem.IsSelected = false;
             _currentlySelectedListBoxItem = null;
         }
-        _journalListBox.ItemsSource = groups;
+        _journalListBox.ItemsSource = groups; // Still binding the top-level groups
     }
 
+    // Updated to handle nested Month Groups
     private void UpdateVisualSelection(JournalViewModel? newSelection)
     {
+        // Clear previous selection highlight if any
         if (_currentlySelectedListBoxItem != null)
         {
             _currentlySelectedListBoxItem.IsSelected = false;
@@ -309,31 +311,63 @@ public sealed class MainView : UserControl
 
         if (newSelection == null || _journalListBox.ItemsSource == null) return;
 
-        foreach (var group in _journalListBox.ItemsSource.OfType<JournalGroupViewModel>())
+        // Find the target ListBoxItem through the nested structure
+        foreach (var yearGroup in _journalListBox.ItemsSource.OfType<JournalGroupViewModel>())
         {
-            var groupContainer = _journalListBox.ContainerFromItem(group) as Control;
-            if (groupContainer == null)
+            var yearGroupContainer = _journalListBox.ContainerFromItem(yearGroup) as Control;
+            if (yearGroupContainer == null)
             {
-                _journalListBox.ScrollIntoView(group);
-                continue;
+                // If container not realized, try scrolling the year group into view first
+                _journalListBox.ScrollIntoView(yearGroup);
+                // We might need to defer the rest of the search until UI updates
+                Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                return; // Exit for now, will retry after scroll
             }
 
-            var nestedItemsControl = groupContainer.FindDescendantOfType<ItemsControl>();
-            if (nestedItemsControl == null) continue;
+            // Find the ItemsControl for MonthGroups within the YearGroup container
+            var monthItemsControl = yearGroupContainer.FindDescendantOfType<ItemsControl>();
+            if (monthItemsControl == null) continue; // Should not happen with the template
 
-            var newItemContainer = nestedItemsControl.ContainerFromItem(newSelection) as ListBoxItem;
+            // Find the specific MonthGroupViewModel that contains the newSelection
+            var targetMonthGroup = yearGroup.MonthGroups.FirstOrDefault(mg => mg.Journals.Contains(newSelection));
+            if (targetMonthGroup == null) continue; // Journal not in this year group
 
-            if (newItemContainer != null)
+            var monthGroupContainer = monthItemsControl.ContainerFromItem(targetMonthGroup) as Control;
+            if (monthGroupContainer == null)
             {
-                newItemContainer.IsSelected = true;
-                _currentlySelectedListBoxItem = newItemContainer;
-                _journalListBox.ScrollIntoView(group);
-                Dispatcher.UIThread.Post(() => newItemContainer.BringIntoView(), DispatcherPriority.Background);
-                break;
+                // If month container not realized, scroll month group into view
+                monthItemsControl.ScrollIntoView(targetMonthGroup);
+                Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                return; // Exit for now, will retry after scroll
+            }
+
+            // Find the ItemsControl for Journals within the MonthGroup container
+            var journalItemsControl = monthGroupContainer.FindDescendantOfType<ItemsControl>();
+            if (journalItemsControl == null) continue; // Should not happen
+
+            // Find the final ListBoxItem for the JournalViewModel
+            var journalItemContainer = journalItemsControl.ContainerFromItem(newSelection) as ListBoxItem;
+            if (journalItemContainer != null)
+            {
+                // Found it! Select and scroll.
+                journalItemContainer.IsSelected = true;
+                _currentlySelectedListBoxItem = journalItemContainer; // Track the selected item
+
+                // Scroll the main listbox to the year, then the inner controls
+                _journalListBox.ScrollIntoView(yearGroup);
+                monthItemsControl.ScrollIntoView(targetMonthGroup);
+                journalItemsControl.ScrollIntoView(newSelection);
+
+                // Ensure the final item is fully visible
+                Dispatcher.UIThread.Post(() => journalItemContainer.BringIntoView(), DispatcherPriority.Loaded);
+                return; // Found and selected, exit the loop
             }
             else
             {
-                nestedItemsControl.ScrollIntoView(newSelection);
+                // If journal item container not realized yet, scroll it into view
+                 journalItemsControl.ScrollIntoView(newSelection);
+                 Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                 return; // Exit for now, will retry after scroll
             }
         }
     }
@@ -397,67 +431,108 @@ public sealed class MainView : UserControl
 
     private static IDataTemplate JournalDataTemplate()
     {
-        return new FuncDataTemplate<object>((data, ns) =>
+        // Template for the top-level item (Year Group)
+        return new FuncDataTemplate<JournalGroupViewModel>((yearVm, ns) =>
         {
-            if (data is JournalGroupViewModel groupVm)
+            // ItemsControl for the months within this year
+            var monthItemsControl = new ItemsControl
             {
-                var itemsControl = new ItemsControl
-                {
-                    ItemsSource = groupVm.Journals,
-                    ItemTemplate = JournalItemTemplate(),
-                    Focusable = false
-                };
+                ItemsSource = yearVm.MonthGroups, // Bind to the collection of Month Groups
+                ItemTemplate = MonthGroupTemplate(), // Use the new template for months
+                Focusable = false // Don't let this steal focus
+            };
 
-                return new StackPanel
+            return new StackPanel // Container for the year header and its months
+            {
+                Spacing = 4,
+                Margin = new Thickness(5, 8, 5, 4), // Outer margin for the year group
+                Children =
                 {
-                    Spacing = 4,
-                    Margin = new Thickness(5, 8, 5, 4),
-                    Children =
+                    // Year Header Text
+                    new TextBlock
                     {
-                        new TextBlock
-                        {
-                            Text = groupVm.Year.ToString(),
-                            FontSize = 16,
-                            FontWeight = FontWeight.Bold,
-                            Margin = new Thickness(0, 0, 0, 5),
-                            IsEnabled = false,
-                            Cursor = Cursor.Default
-                        },
-                        itemsControl
-                    }
-                };
-            }
-            return new TextBlock { Text = "Invalid item type in ListBox" };
-        }, supportsRecycling: true);
+                        Text = yearVm.DisplayName, // Use DisplayName from JournalGroupViewModel
+                        FontSize = 16,
+                        FontWeight = FontWeight.Bold,
+                        Margin = new Thickness(0, 0, 0, 5), // Margin below year header
+                        IsEnabled = false, // Not interactive
+                        Cursor = Cursor.Default
+                    },
+                    // The list of months for this year
+                    monthItemsControl
+                }
+            };
+        }, supportsRecycling: true); // Enable recycling for performance
     }
 
+    // New Template for the Month Group level
+    private static IDataTemplate MonthGroupTemplate()
+    {
+        return new FuncDataTemplate<JournalMonthGroupViewModel>((monthVm, ns) =>
+        {
+            // ItemsControl for the journals within this month
+            var journalItemsControl = new ItemsControl
+            {
+                ItemsSource = monthVm.Journals, // Bind to the collection of Journals
+                ItemTemplate = JournalItemTemplate(), // Use the existing template for journal entries
+                Focusable = false // Don't let this steal focus
+            };
+
+            return new StackPanel // Container for the month header and its journals
+            {
+                Spacing = 2,
+                Margin = new Thickness(15, 4, 5, 4), // Indent month groups slightly
+                Children =
+                {
+                    // Month Header Text
+                    new TextBlock
+                    {
+                        Text = monthVm.DisplayName, // Use DisplayName from JournalMonthGroupViewModel
+                        FontSize = 13,
+                        FontWeight = FontWeight.SemiBold,
+                        Margin = new Thickness(0, 0, 0, 3), // Margin below month header
+                        IsEnabled = false, // Not interactive
+                        Cursor = Cursor.Default
+                    },
+                    // The list of journals for this month
+                    journalItemsControl
+                }
+            };
+        }, supportsRecycling: true); // Enable recycling
+    }
+
+
+    // Template for the final Journal Entry item (leaf node)
     private static IDataTemplate JournalItemTemplate()
     {
+        // Defines how the JournalViewModel itself is displayed within the ListBoxItem
         var textBlockTemplate = new FuncDataTemplate<JournalViewModel>((vm, ns) =>
             new TextBlock
             {
-                Text = vm.DisplayName,
+                [!TextBlock.TextProperty] = new Avalonia.Data.Binding(nameof(vm.DisplayName)), // Bind to DisplayName
                 Padding = new Thickness(0),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center
             }, supportsRecycling: true);
 
+        // Creates the actual ListBoxItem container for the JournalViewModel
         return new FuncDataTemplate<JournalViewModel>((journalVm, ns) =>
         {
             var item = new ListBoxItem
             {
-                DataContext = journalVm,
-                Content = journalVm,
-                ContentTemplate = textBlockTemplate,
-                Padding = new Thickness(15, 3, 5, 3),
+                DataContext = journalVm, // Set DataContext for binding and event handlers
+                Content = journalVm, // Content to be displayed using ContentTemplate
+                ContentTemplate = textBlockTemplate, // Use the TextBlock template above
+                Padding = new Thickness(30, 3, 5, 3), // Indent journal items further under the month
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center,
-                Cursor = new Cursor(StandardCursorType.Hand)
+                Cursor = new Cursor(StandardCursorType.Hand) // Indicate it's clickable
             };
+            // Attach event handler to detect clicks
             item.PointerPressed += JournalItem_PointerPressed;
             return item;
         },
-        supportsRecycling: true);
+        supportsRecycling: true); // Enable recycling
     }
 
     private static void JournalItem_PointerPressed(object? sender, PointerPressedEventArgs e)
