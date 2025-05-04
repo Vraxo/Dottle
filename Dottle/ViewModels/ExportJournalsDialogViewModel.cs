@@ -1,0 +1,242 @@
+using Avalonia.Controls;
+using Avalonia.Platform.Storage;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Dottle.Models;
+using Dottle.Services;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Dottle.ViewModels;
+
+public partial class ExportJournalItemViewModel : ViewModelBase
+{
+    [ObservableProperty]
+    private bool _isSelected;
+
+    public JournalEntry Journal { get; }
+    public string DisplayName => Journal.DisplayName;
+    public string FileName => Journal.FileName;
+
+    public ExportJournalItemViewModel(JournalEntry journal)
+    {
+        Journal = journal;
+        _isSelected = true;
+    }
+}
+
+public partial class ExportJournalsDialogViewModel : ViewModelBase
+{
+    private readonly JournalService _journalService;
+    private readonly string _password;
+    private readonly Window? _owner;
+
+    [ObservableProperty]
+    private ObservableCollection<ExportJournalItemViewModel> _journalItems = new();
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanExport))] // Notify CanExport when path changes
+    [NotifyCanExecuteChangedFor(nameof(ExportCommand))] // Notify command too
+    private string? _selectedFolderPath;
+
+    [ObservableProperty]
+    private string? _statusMessage;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanSelectFolder))]
+    [NotifyPropertyChangedFor(nameof(CanExport))]
+    [NotifyCanExecuteChangedFor(nameof(SelectFolderCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
+    private bool _isExporting;
+
+    [ObservableProperty]
+    private double _exportProgress;
+
+    public bool CanSelectFolder => !_isExporting;
+    public bool CanExport => !_isExporting && !string.IsNullOrEmpty(SelectedFolderPath) && JournalItems.Any(j => j.IsSelected);
+
+    public ExportJournalsDialogViewModel(JournalService journalService, string password, Window? owner)
+    {
+        _journalService = journalService;
+        _password = password;
+        _owner = owner;
+
+        LoadAllJournals();
+        UpdateStatus("Ready to export.");
+    }
+
+    private void LoadAllJournals()
+    {
+        // Unsubscribe from previous items if any
+        foreach (var oldItem in JournalItems)
+        {
+            oldItem.PropertyChanged -= JournalItem_PropertyChanged;
+        }
+
+        try
+        {
+            var allEntries = _journalService.GetAllJournalEntries();
+            var itemViewModels = allEntries
+                .OrderByDescending(e => e.Date)
+                .Select(entry => new ExportJournalItemViewModel(entry))
+                .ToList(); // Create list first
+
+            // Subscribe to PropertyChanged for each new item
+            foreach (var newItem in itemViewModels)
+            {
+                newItem.PropertyChanged += JournalItem_PropertyChanged;
+            }
+
+            JournalItems = new ObservableCollection<ExportJournalItemViewModel>(itemViewModels);
+            UpdateStatus($"Loaded {JournalItems.Count} journals.");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Error loading journals: {ex.Message}");
+            JournalItems.Clear(); // Clear collection on error
+        }
+
+        // Explicitly notify after loading/clearing
+        OnPropertyChanged(nameof(CanExport));
+        SelectFolderCommand.NotifyCanExecuteChanged();
+        ExportCommand.NotifyCanExecuteChanged();
+    }
+
+    // Handler for PropertyChanged on individual Journal items
+    private void JournalItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ExportJournalItemViewModel.IsSelected))
+        {
+            // Re-evaluate CanExport and notify the command when selection changes
+            OnPropertyChanged(nameof(CanExport));
+            ExportCommand.NotifyCanExecuteChanged();
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanSelectFolder))]
+    private async Task SelectFolder()
+    {
+        if (_owner == null)
+        {
+            UpdateStatus("Error: Cannot open folder picker, owner window not available.");
+            return;
+        }
+
+        var folderPickerOptions = new FolderPickerOpenOptions
+        {
+            Title = "Select Export Destination Folder",
+            AllowMultiple = false
+        };
+
+        var result = await _owner.StorageProvider.OpenFolderPickerAsync(folderPickerOptions);
+
+        if (result.Count > 0)
+        {
+            string? path = result[0].TryGetLocalPath();
+            if (!string.IsNullOrEmpty(path))
+            {
+                SelectedFolderPath = path;
+                UpdateStatus($"Selected folder: {SelectedFolderPath}");
+            }
+            else
+            {
+                UpdateStatus("Error: Could not get a local path for the selected folder.");
+                SelectedFolderPath = null;
+            }
+        }
+        else
+        {
+            UpdateStatus("Folder selection cancelled.");
+        }
+        // CanExecute properties/commands are notified via [Notify...] attributes on SelectedFolderPath
+    }
+
+    [RelayCommand(CanExecute = nameof(CanExport))]
+    private async Task Export()
+    {
+        if (string.IsNullOrEmpty(SelectedFolderPath) || !Directory.Exists(SelectedFolderPath))
+        {
+            UpdateStatus("Error: Invalid or non-existent export folder selected.");
+            return;
+        }
+
+        var selectedJournals = JournalItems.Where(j => j.IsSelected).ToList();
+        if (!selectedJournals.Any())
+        {
+            UpdateStatus("No journals selected for export.");
+            return;
+        }
+
+        IsExporting = true;
+        ExportProgress = 0;
+        int exportedCount = 0;
+        int failedCount = 0;
+        int totalToExport = selectedJournals.Count;
+
+        UpdateStatus($"Starting export of {totalToExport} journals to {SelectedFolderPath}...");
+
+        for (int i = 0; i < totalToExport; i++)
+        {
+            var journalVm = selectedJournals[i];
+            UpdateStatus($"Exporting {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
+            ExportProgress = (double)(i + 1) / totalToExport * 100;
+
+            try
+            {
+                string? encryptedContent = await Task.Run(() =>
+                    _journalService.ReadJournalContent(journalVm.FileName, _password));
+
+                if (encryptedContent != null)
+                {
+                    string outputFileName = Path.ChangeExtension(journalVm.FileName, ".txt");
+                    string outputPath = Path.Combine(SelectedFolderPath, outputFileName);
+
+                    Directory.CreateDirectory(SelectedFolderPath);
+
+                    await File.WriteAllTextAsync(outputPath, encryptedContent);
+                    exportedCount++;
+                }
+                else
+                {
+                    failedCount++;
+                    UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
+                }
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                UpdateStatus($"Error exporting {journalVm.DisplayName}: {ex.Message}. Skipped.");
+            }
+            await Task.Delay(10);
+        }
+
+        IsExporting = false;
+        ExportProgress = 100;
+        UpdateStatus($"Export complete. Exported: {exportedCount}, Failed: {failedCount}.");
+    }
+
+    private void UpdateStatus(string message)
+    {
+        StatusMessage = $"{DateTime.Now:HH:mm:ss} - {message}";
+    }
+
+    [RelayCommand] private void Confirm() { /* Logic handled by View closing dialog */ }
+    [RelayCommand] private void Cancel() { /* Logic handled by View closing dialog */ }
+
+    // Consider adding cleanup if the ViewModel has a longer lifecycle
+    // For a dialog, it's usually less critical as it gets garbage collected.
+    // Example (if needed):
+    // public void Cleanup()
+    // {
+    //     foreach (var item in JournalItems)
+    //     {
+    //         item.PropertyChanged -= JournalItem_PropertyChanged;
+    //     }
+    //     JournalItems.Clear();
+    // }
+}

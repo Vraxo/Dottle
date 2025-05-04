@@ -39,6 +39,15 @@ public sealed class MainView : UserControl
     {
         this.DataContextChanged += OnDataContextChangedHandler;
 
+        var exportJournalsMenuItem = new MenuItem { Header = "Export Journals..." };
+        exportJournalsMenuItem.Click += ExportJournalsMenuItem_Click; // Placeholder handler
+
+        var fileMenu = new MenuItem
+        {
+            Header = "_File",
+            Items = { exportJournalsMenuItem }
+        };
+
         var changePasswordMenuItem = new MenuItem { Header = "Change Password..." };
         changePasswordMenuItem.Click += ChangePasswordMenuItem_Click;
 
@@ -50,7 +59,7 @@ public sealed class MainView : UserControl
 
         _menuBar = new Menu
         {
-            Items = { securityMenu }
+            Items = { fileMenu, securityMenu } // Add fileMenu here
         };
         DockPanel.SetDock(_menuBar, Dock.Top);
 
@@ -286,6 +295,21 @@ public sealed class MainView : UserControl
             {
                 UpdateStatusBar("Could not initiate password change.");
             }
+        }
+    }
+
+    // Executes the VM command to show the export dialog
+    private void ExportJournalsMenuItem_Click(object? sender, RoutedEventArgs e)
+    {
+        if (_viewModel?.ShowExportDialogCommand.CanExecute(null) ?? false)
+        {
+            _ = _viewModel.ShowExportDialogCommand.ExecuteAsync(null); // Execute async command
+        }
+        else
+        {
+             System.Diagnostics.Debug.WriteLine("Cannot execute ShowExportDialogCommand.");
+             // Optionally update status bar or show a message
+             // _viewModel?.UpdateStatusBar("Cannot open export dialog right now.");
         }
     }
 

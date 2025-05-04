@@ -263,6 +263,7 @@ using System.Linq;
 using System.Text;
 using Dottle.Models;
 using Dottle.Utils;
+using System.Globalization;
 
 namespace Dottle.Services;
 
@@ -289,18 +290,45 @@ public class JournalService
     {
         var journalEntries = new List<JournalEntry>();
         var files = Directory.EnumerateFiles(_journalDirectory, "*.txt");
+        int currentPersianYear = PersianCalendarHelper.GetPersianYear(DateTime.Now);
 
         foreach (var file in files)
         {
             string fileName = Path.GetFileNameWithoutExtension(file);
             if (PersianCalendarHelper.TryParsePersianDateString(fileName, out DateTime date))
             {
+                // Filter for the current Persian year
+                if (PersianCalendarHelper.GetPersianYear(date) == currentPersianYear)
+                {
+                    journalEntries.Add(new JournalEntry(Path.GetFileName(file), date));
+                }
+            }
+        }
+
+        // Order by date descending within the current year
+        return journalEntries.OrderByDescending(je => je.Date);
+    }
+
+    // New method to get all entries without year filtering
+    public IEnumerable<JournalEntry> GetAllJournalEntries()
+    {
+        var journalEntries = new List<JournalEntry>();
+        var files = Directory.EnumerateFiles(_journalDirectory, "*.txt");
+
+        foreach (var file in files)
+        {
+            string fileName = Path.GetFileNameWithoutExtension(file);
+            if (PersianCalendarHelper.TryParsePersianDateString(fileName, out DateTime date))
+            {
+                // No year filter here
                 journalEntries.Add(new JournalEntry(Path.GetFileName(file), date));
             }
         }
 
+        // Order all entries by date descending
         return journalEntries.OrderByDescending(je => je.Date);
     }
+
 
     public string? ReadJournalContent(string fileName, string password)
     {
@@ -442,6 +470,29 @@ public static partial class PersianCalendarHelper
         return pc.GetYear(dt);
     }
 
+    public static int GetPersianMonth(DateTime dt)
+    {
+        return pc.GetMonth(dt);
+    }
+
+    private static readonly string[] PersianMonthNames =
+    [
+        "", // Index 0 is unused
+        "Farvardin", "Ordibehesht", "Khordad",
+        "Tir", "Mordad", "Shahrivar",
+        "Mehr", "Aban", "Azar",
+        "Dey", "Bahman", "Esfand"
+    ];
+
+    public static string GetPersianMonthName(int month)
+    {
+        if (month >= 1 && month <= 12)
+        {
+            return PersianMonthNames[month];
+        }
+        return "Invalid Month"; // Or throw an exception
+    }
+
     public static bool TryParsePersianDateString(string dateString, out DateTime result)
     {
         result = DateTime.MinValue;
@@ -545,6 +596,235 @@ public partial class ChangePasswordDialogViewModel : ViewModelBase
 }
 </file>
 
+<file path="ViewModels\ExportJournalsDialogViewModel.cs">
+using Avalonia.Controls;
+using Avalonia.Platform.Storage;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Dottle.Models;
+using Dottle.Services;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Dottle.ViewModels;
+
+// ViewModel for an individual journal entry in the export list
+public partial class ExportJournalItemViewModel : ViewModelBase
+{
+    [ObservableProperty]
+    private bool _isSelected;
+
+    public JournalEntry Journal { get; }
+    public string DisplayName => Journal.DisplayName;
+    public string FileName => Journal.FileName;
+
+    public ExportJournalItemViewModel(JournalEntry journal)
+    {
+        Journal = journal;
+        _isSelected = true; // Default to selected
+    }
+}
+
+public partial class ExportJournalsDialogViewModel : ViewModelBase
+{
+    private readonly JournalService _journalService;
+    private readonly string _password;
+    private readonly Window? _owner;
+
+    [ObservableProperty]
+    private ObservableCollection<ExportJournalItemViewModel> _journalItems = new();
+
+    [ObservableProperty]
+    private string? _selectedFolderPath;
+
+    [ObservableProperty]
+    private string? _statusMessage;
+
+    [ObservableProperty]
+    private bool _isExporting;
+
+    [ObservableProperty]
+    private double _exportProgress;
+
+    public bool CanSelectFolder => !_isExporting;
+    public bool CanExport => !_isExporting && !string.IsNullOrEmpty(SelectedFolderPath) && JournalItems.Any(j => j.IsSelected);
+
+    // Constructor requires the service, password, and owner window for dialogs
+    public ExportJournalsDialogViewModel(JournalService journalService, string password, Window? owner)
+    {
+        _journalService = journalService;
+        _password = password;
+        _owner = owner; // Needed for FolderPicker
+
+        LoadAllJournals();
+        UpdateStatus("Ready to export.");
+    }
+
+    private void LoadAllJournals()
+    {
+        try
+        {
+            // Get *all* journal entries, regardless of year filter in MainViewModel
+            var allEntries = _journalService.GetAllJournalEntries();
+            var itemViewModels = allEntries
+                .OrderByDescending(e => e.Date) // Order by date descending
+                .Select(entry => new ExportJournalItemViewModel(entry));
+
+            JournalItems = new ObservableCollection<ExportJournalItemViewModel>(itemViewModels);
+            UpdateStatus($"Loaded {JournalItems.Count} journals.");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Error loading journals: {ex.Message}");
+            // Handle error appropriately, maybe disable export
+        }
+        SelectFolderCommand.NotifyCanExecuteChanged();
+        ExportCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnIsExportingChanged(bool value)
+    {
+        // Update CanExecute for commands when IsExporting changes
+        SelectFolderCommand.NotifyCanExecuteChanged();
+        ExportCommand.NotifyCanExecuteChanged();
+        // Also update the individual item selection state if needed
+        foreach (var item in JournalItems)
+        {
+            // Optionally disable checkboxes during export
+            // item.RaisePropertyChanged(nameof(item.IsEnabled)); // Assuming an IsEnabled property exists
+        }
+    }
+
+    partial void OnSelectedFolderPathChanged(string? value)
+    {
+        ExportCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand(CanExecute = nameof(CanSelectFolder))]
+    private async Task SelectFolder()
+    {
+        if (_owner == null)
+        {
+            UpdateStatus("Error: Cannot open folder picker, owner window not available.");
+            return;
+        }
+
+        var folderPickerOptions = new FolderPickerOpenOptions
+        {
+            Title = "Select Export Destination Folder",
+            AllowMultiple = false
+        };
+
+        var result = await _owner.StorageProvider.OpenFolderPickerAsync(folderPickerOptions);
+
+        if (result.Count > 0)
+        {
+            // Use TryGetUri(out Uri? uri) or TryGetLocalPath() depending on platform needs
+            // For simplicity, assuming TryGetLocalPath() works for typical desktop scenarios.
+            string? path = result[0].TryGetLocalPath();
+            if (!string.IsNullOrEmpty(path))
+            {
+                SelectedFolderPath = path;
+                UpdateStatus($"Selected folder: {SelectedFolderPath}");
+            }
+            else
+            {
+                // Handle cases where local path isn't directly available (e.g., cloud storage)
+                UpdateStatus("Error: Could not get a local path for the selected folder.");
+                SelectedFolderPath = null; // Clear if invalid
+            }
+        }
+        else
+        {
+            UpdateStatus("Folder selection cancelled.");
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanExport))]
+    private async Task Export()
+    {
+        if (string.IsNullOrEmpty(SelectedFolderPath) || !Directory.Exists(SelectedFolderPath))
+        {
+            UpdateStatus("Error: Invalid or non-existent export folder selected.");
+            return;
+        }
+
+        var selectedJournals = JournalItems.Where(j => j.IsSelected).ToList();
+        if (!selectedJournals.Any())
+        {
+            UpdateStatus("No journals selected for export.");
+            return;
+        }
+
+        IsExporting = true;
+        ExportProgress = 0;
+        int exportedCount = 0;
+        int failedCount = 0;
+        int totalToExport = selectedJournals.Count;
+
+        UpdateStatus($"Starting export of {totalToExport} journals to {SelectedFolderPath}...");
+
+        for (int i = 0; i < totalToExport; i++)
+        {
+            var journalVm = selectedJournals[i];
+            UpdateStatus($"Exporting {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
+            ExportProgress = (double)(i + 1) / totalToExport * 100;
+
+            try
+            {
+                // Read encrypted content
+                string? encryptedContent = await Task.Run(() =>
+                    _journalService.ReadJournalContent(journalVm.FileName, _password));
+
+                if (encryptedContent != null)
+                {
+                    // Construct output path
+                    string outputFileName = Path.ChangeExtension(journalVm.FileName, ".txt");
+                    string outputPath = Path.Combine(SelectedFolderPath, outputFileName);
+
+                    // Ensure directory exists (should already, but good practice)
+                    Directory.CreateDirectory(SelectedFolderPath);
+
+                    // Write decrypted content
+                    await File.WriteAllTextAsync(outputPath, encryptedContent);
+                    exportedCount++;
+                }
+                else
+                {
+                    failedCount++;
+                    UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
+                    // Log this failure more permanently if needed
+                }
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                UpdateStatus($"Error exporting {journalVm.DisplayName}: {ex.Message}. Skipped.");
+                // Log this error
+            }
+            await Task.Delay(10); // Small delay for UI responsiveness
+        }
+
+        IsExporting = false;
+        ExportProgress = 100;
+        UpdateStatus($"Export complete. Exported: {exportedCount}, Failed: {failedCount}.");
+    }
+
+    private void UpdateStatus(string message)
+    {
+        StatusMessage = $"{DateTime.Now:HH:mm:ss} - {message}";
+    }
+
+    // Commands for the dialog buttons (handled by the View closing the dialog)
+    [RelayCommand] private void Confirm() { /* Logic handled by View closing dialog */ }
+    [RelayCommand] private void Cancel() { /* Logic handled by View closing dialog */ }
+}
+</file>
+
 <file path="ViewModels\JournalGroupViewModel.cs">
 using System.Collections.ObjectModel;
 using System.Linq;
@@ -554,13 +834,44 @@ namespace Dottle.ViewModels;
 public partial class JournalGroupViewModel : ViewModelBase
 {
     public int Year { get; }
-    public ObservableCollection<JournalViewModel> Journals { get; }
+    public ObservableCollection<JournalMonthGroupViewModel> MonthGroups { get; }
 
-    public JournalGroupViewModel(int year, IEnumerable<JournalViewModel> journals)
+    public JournalGroupViewModel(int year, IEnumerable<JournalMonthGroupViewModel> monthGroups)
     {
         Year = year;
+        // Order months descending (e.g., Esfand before Farvardin)
+        MonthGroups = new ObservableCollection<JournalMonthGroupViewModel>(monthGroups.OrderByDescending(m => m.Month));
+    }
+
+    // Display name for the TreeView
+    public string DisplayName => $"{Year} ({MonthGroups.Sum(m => m.Journals.Count)})";
+}
+</file>
+
+<file path="ViewModels\JournalMonthGroupViewModel.cs">
+using System.Collections.ObjectModel;
+using System.Linq;
+using Dottle.Utils; // Assuming PersianCalendarHelper is here
+
+namespace Dottle.ViewModels;
+
+public partial class JournalMonthGroupViewModel : ViewModelBase
+{
+    public int Year { get; }
+    public int Month { get; }
+    public string MonthName { get; }
+    public ObservableCollection<JournalViewModel> Journals { get; }
+
+    public JournalMonthGroupViewModel(int year, int month, IEnumerable<JournalViewModel> journals)
+    {
+        Year = year;
+        Month = month;
+        MonthName = PersianCalendarHelper.GetPersianMonthName(month); // Get month name
         Journals = new ObservableCollection<JournalViewModel>(journals.OrderByDescending(j => j.Date));
     }
+
+    // Display name for the TreeView
+    public string DisplayName => $"{MonthName} ({Journals.Count})";
 }
 </file>
 
@@ -720,19 +1031,30 @@ public partial class MainViewModel : ViewModelBase
 
     private void LoadJournalList()
     {
-        var entries = _journalService.GetJournalEntries();
+        var entries = _journalService.GetJournalEntries(); // Already filtered by current year
         var viewModels = entries.Select(e => new JournalViewModel(e)).ToList();
 
         var groups = viewModels
-            .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date))
-            .Select(g => new JournalGroupViewModel(g.Key, g.ToList()))
-            .OrderByDescending(g => g.Year);
+            .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date)) // Group by Year
+            .Select(yearGroup =>
+            {
+                var monthGroups = yearGroup
+                    .GroupBy(jvm => PersianCalendarHelper.GetPersianMonth(jvm.Date)) // Group by Month within Year
+                    .Select(monthGroup => new JournalMonthGroupViewModel(
+                        yearGroup.Key,
+                        monthGroup.Key,
+                        monthGroup.ToList())) // Create Month Group VM
+                    .OrderByDescending(mg => mg.Month); // Order months within the year
+
+                return new JournalGroupViewModel(yearGroup.Key, monthGroups); // Create Year Group VM
+            })
+            .OrderByDescending(g => g.Year); // Order years
 
         JournalGroups = new ObservableCollection<JournalGroupViewModel>(groups);
 
         SelectedJournal = null;
         CurrentJournalContent = string.Empty;
-        UpdateStatusBar("Journal list refreshed.");
+        UpdateStatusBar("Journal list refreshed (Current Year Only).");
     }
 
     private async void LoadSelectedJournalContent()
@@ -854,8 +1176,10 @@ public partial class MainViewModel : ViewModelBase
 
     private JournalViewModel? FindJournalViewModelByFileName(string fileName)
     {
+        // Search through the new nested structure: Year -> Month -> Journal
         return JournalGroups
-            .SelectMany(group => group.Journals)
+            .SelectMany(yearGroup => yearGroup.MonthGroups)
+            .SelectMany(monthGroup => monthGroup.Journals)
             .FirstOrDefault(j => j.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -923,6 +1247,39 @@ public partial class MainViewModel : ViewModelBase
             UpdateStatusBar("Error changing password. See error message. Password remains unchanged.");
         }
         ChangePasswordCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand]
+    private async Task ShowExportDialog()
+    {
+        if (OwnerWindow == null)
+        {
+            UpdateStatusBar("Error: Cannot show export dialog, owner window not set.");
+            return;
+        }
+
+        UpdateStatusBar("Opening export dialog...");
+
+        try
+        {
+            // Pass the JournalService, current password, and owner window to the dialog VM
+            var exportViewModel = new ExportJournalsDialogViewModel(_journalService, _password, OwnerWindow);
+            var exportDialog = new ExportJournalsDialog
+            {
+                DataContext = exportViewModel
+            };
+
+            // Show the dialog modally
+            await exportDialog.ShowDialog(OwnerWindow); // We don't need a result back
+
+            UpdateStatusBar("Export dialog closed.");
+        }
+        catch (Exception ex)
+        {
+            // Log the exception details if possible
+            System.Diagnostics.Debug.WriteLine($"Error showing export dialog: {ex}");
+            UpdateStatusBar($"Error: Could not open export dialog. {ex.Message}");
+        }
     }
 }
 </file>
@@ -1210,6 +1567,155 @@ public sealed class ChangePasswordDialog : Window
 }
 </file>
 
+<file path="Views\ExportJournalsDialog.cs">
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Templates;
+using Avalonia.Data;
+using Avalonia.Layout;
+using Avalonia.Markup.Xaml.Templates;
+using Avalonia.Media;
+using Dottle.ViewModels;
+
+namespace Dottle.Views;
+
+public class ExportJournalsDialog : Window
+{
+    public bool IsConfirmed { get; private set; } = false;
+
+    public ExportJournalsDialog()
+    {
+        Title = "Export Journals";
+        Width = 500;
+        Height = 600;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        CanResize = false; // Keep it simple for now
+
+        // --- UI Elements ---
+
+        // Journal ListBox
+        var journalListBox = new ListBox
+        {
+            Height = 300, // Fixed height for the list
+            Margin = new Thickness(10),
+            ItemTemplate = new FuncDataTemplate<ExportJournalItemViewModel>((vm, ns) =>
+                new CheckBox
+                {
+                    Content = vm.DisplayName,
+                    [!CheckBox.IsCheckedProperty] = new Binding(nameof(vm.IsSelected), BindingMode.TwoWay),
+                    // Optionally bind IsEnabled to !vm.Parent.IsExporting if needed
+                }, supportsRecycling: true),
+            [!ItemsControl.ItemsSourceProperty] = new Binding(nameof(ExportJournalsDialogViewModel.JournalItems))
+        };
+
+        // Folder Selection Area
+        var folderPathTextBlock = new TextBlock
+        {
+            Margin = new Thickness(10, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            [!TextBlock.TextProperty] = new Binding(nameof(ExportJournalsDialogViewModel.SelectedFolderPath)) { FallbackValue = "No folder selected" }
+        };
+        var selectFolderButton = new Button
+        {
+            Content = "Select Folder...",
+            Margin = new Thickness(10, 5, 10, 5),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            [!Button.CommandProperty] = new Binding(nameof(ExportJournalsDialogViewModel.SelectFolderCommand)),
+            [!Button.IsEnabledProperty] = new Binding(nameof(ExportJournalsDialogViewModel.CanSelectFolder))
+        };
+        var folderPanel = new DockPanel
+        {
+            Margin = new Thickness(10, 0),
+            Children = { selectFolderButton, folderPathTextBlock }
+        };
+        DockPanel.SetDock(selectFolderButton, Dock.Left);
+
+        // Progress Bar
+        var progressBar = new ProgressBar
+        {
+            Margin = new Thickness(10, 5),
+            Minimum = 0,
+            Maximum = 100,
+            [!ProgressBar.ValueProperty] = new Binding(nameof(ExportJournalsDialogViewModel.ExportProgress)),
+            [!ProgressBar.IsVisibleProperty] = new Binding(nameof(ExportJournalsDialogViewModel.IsExporting))
+        };
+
+        // Status TextBlock
+        var statusTextBlock = new TextBlock
+        {
+            Margin = new Thickness(10, 0, 10, 5),
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            [!TextBlock.TextProperty] = new Binding(nameof(ExportJournalsDialogViewModel.StatusMessage))
+        };
+
+        // Buttons (Export / Close)
+        var exportButton = new Button
+        {
+            Content = "Export Selected",
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(5),
+            Classes = { "accent" },
+            [!Button.CommandProperty] = new Binding(nameof(ExportJournalsDialogViewModel.ExportCommand)),
+            [!Button.IsEnabledProperty] = new Binding(nameof(ExportJournalsDialogViewModel.CanExport))
+        };
+        var closeButton = new Button
+        {
+            Content = "Close",
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(5)
+        };
+        closeButton.Click += (s, e) => Close(false); // Always close with false result
+
+        var buttonPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(10),
+            Spacing = 5,
+            Children = { exportButton, closeButton }
+        };
+
+        // --- Layout ---
+        var mainPanel = new DockPanel
+        {
+            Children =
+            {
+                buttonPanel, // Bottom
+                statusTextBlock, // Above buttons
+                progressBar, // Above status
+                folderPanel, // Above progress
+                journalListBox // Top, fills remaining space
+            }
+        };
+
+        DockPanel.SetDock(buttonPanel, Dock.Bottom);
+        DockPanel.SetDock(statusTextBlock, Dock.Bottom);
+        DockPanel.SetDock(progressBar, Dock.Bottom);
+        DockPanel.SetDock(folderPanel, Dock.Bottom);
+        // journalListBox fills the rest
+
+        Content = mainPanel;
+
+        // Close window when DataContext signals completion (optional, Close button is primary)
+        this.DataContextChanged += (s, e) =>
+        {
+            if (DataContext is ExportJournalsDialogViewModel vm)
+            {
+                // Could potentially close automatically after export, but manual close is safer
+            }
+        };
+    }
+
+    // Override Close to manage the result if needed, though not strictly necessary here
+    public new void Close(object? result = null)
+    {
+        // We don't really need a result from this dialog, but keeping the pattern
+        base.Close(result);
+    }
+}
+</file>
+
 <file path="Views\LoginView.cs">
 using Avalonia;
 using Avalonia.Controls;
@@ -1466,6 +1972,15 @@ public sealed class MainView : UserControl
     {
         this.DataContextChanged += OnDataContextChangedHandler;
 
+        var exportJournalsMenuItem = new MenuItem { Header = "Export Journals..." };
+        exportJournalsMenuItem.Click += ExportJournalsMenuItem_Click; // Placeholder handler
+
+        var fileMenu = new MenuItem
+        {
+            Header = "_File",
+            Items = { exportJournalsMenuItem }
+        };
+
         var changePasswordMenuItem = new MenuItem { Header = "Change Password..." };
         changePasswordMenuItem.Click += ChangePasswordMenuItem_Click;
 
@@ -1477,7 +1992,7 @@ public sealed class MainView : UserControl
 
         _menuBar = new Menu
         {
-            Items = { securityMenu }
+            Items = { fileMenu, securityMenu } // Add fileMenu here
         };
         DockPanel.SetDock(_menuBar, Dock.Top);
 
@@ -1716,6 +2231,21 @@ public sealed class MainView : UserControl
         }
     }
 
+    // Executes the VM command to show the export dialog
+    private void ExportJournalsMenuItem_Click(object? sender, RoutedEventArgs e)
+    {
+        if (_viewModel?.ShowExportDialogCommand.CanExecute(null) ?? false)
+        {
+            _ = _viewModel.ShowExportDialogCommand.ExecuteAsync(null); // Execute async command
+        }
+        else
+        {
+             System.Diagnostics.Debug.WriteLine("Cannot execute ShowExportDialogCommand.");
+             // Optionally update status bar or show a message
+             // _viewModel?.UpdateStatusBar("Cannot open export dialog right now.");
+        }
+    }
+
     private void UpdateJournalList(IEnumerable<JournalGroupViewModel>? groups)
     {
         if (_currentlySelectedListBoxItem != null)
@@ -1723,11 +2253,13 @@ public sealed class MainView : UserControl
             _currentlySelectedListBoxItem.IsSelected = false;
             _currentlySelectedListBoxItem = null;
         }
-        _journalListBox.ItemsSource = groups;
+        _journalListBox.ItemsSource = groups; // Still binding the top-level groups
     }
 
+    // Updated to handle nested Month Groups
     private void UpdateVisualSelection(JournalViewModel? newSelection)
     {
+        // Clear previous selection highlight if any
         if (_currentlySelectedListBoxItem != null)
         {
             _currentlySelectedListBoxItem.IsSelected = false;
@@ -1736,31 +2268,63 @@ public sealed class MainView : UserControl
 
         if (newSelection == null || _journalListBox.ItemsSource == null) return;
 
-        foreach (var group in _journalListBox.ItemsSource.OfType<JournalGroupViewModel>())
+        // Find the target ListBoxItem through the nested structure
+        foreach (var yearGroup in _journalListBox.ItemsSource.OfType<JournalGroupViewModel>())
         {
-            var groupContainer = _journalListBox.ContainerFromItem(group) as Control;
-            if (groupContainer == null)
+            var yearGroupContainer = _journalListBox.ContainerFromItem(yearGroup) as Control;
+            if (yearGroupContainer == null)
             {
-                _journalListBox.ScrollIntoView(group);
-                continue;
+                // If container not realized, try scrolling the year group into view first
+                _journalListBox.ScrollIntoView(yearGroup);
+                // We might need to defer the rest of the search until UI updates
+                Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                return; // Exit for now, will retry after scroll
             }
 
-            var nestedItemsControl = groupContainer.FindDescendantOfType<ItemsControl>();
-            if (nestedItemsControl == null) continue;
+            // Find the ItemsControl for MonthGroups within the YearGroup container
+            var monthItemsControl = yearGroupContainer.FindDescendantOfType<ItemsControl>();
+            if (monthItemsControl == null) continue; // Should not happen with the template
 
-            var newItemContainer = nestedItemsControl.ContainerFromItem(newSelection) as ListBoxItem;
+            // Find the specific MonthGroupViewModel that contains the newSelection
+            var targetMonthGroup = yearGroup.MonthGroups.FirstOrDefault(mg => mg.Journals.Contains(newSelection));
+            if (targetMonthGroup == null) continue; // Journal not in this year group
 
-            if (newItemContainer != null)
+            var monthGroupContainer = monthItemsControl.ContainerFromItem(targetMonthGroup) as Control;
+            if (monthGroupContainer == null)
             {
-                newItemContainer.IsSelected = true;
-                _currentlySelectedListBoxItem = newItemContainer;
-                _journalListBox.ScrollIntoView(group);
-                Dispatcher.UIThread.Post(() => newItemContainer.BringIntoView(), DispatcherPriority.Background);
-                break;
+                // If month container not realized, scroll month group into view
+                monthItemsControl.ScrollIntoView(targetMonthGroup);
+                Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                return; // Exit for now, will retry after scroll
+            }
+
+            // Find the ItemsControl for Journals within the MonthGroup container
+            var journalItemsControl = monthGroupContainer.FindDescendantOfType<ItemsControl>();
+            if (journalItemsControl == null) continue; // Should not happen
+
+            // Find the final ListBoxItem for the JournalViewModel
+            var journalItemContainer = journalItemsControl.ContainerFromItem(newSelection) as ListBoxItem;
+            if (journalItemContainer != null)
+            {
+                // Found it! Select and scroll.
+                journalItemContainer.IsSelected = true;
+                _currentlySelectedListBoxItem = journalItemContainer; // Track the selected item
+
+                // Scroll the main listbox to the year, then the inner controls
+                _journalListBox.ScrollIntoView(yearGroup);
+                monthItemsControl.ScrollIntoView(targetMonthGroup);
+                journalItemsControl.ScrollIntoView(newSelection);
+
+                // Ensure the final item is fully visible
+                Dispatcher.UIThread.Post(() => journalItemContainer.BringIntoView(), DispatcherPriority.Loaded);
+                return; // Found and selected, exit the loop
             }
             else
             {
-                nestedItemsControl.ScrollIntoView(newSelection);
+                // If journal item container not realized yet, scroll it into view
+                 journalItemsControl.ScrollIntoView(newSelection);
+                 Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                 return; // Exit for now, will retry after scroll
             }
         }
     }
@@ -1824,67 +2388,108 @@ public sealed class MainView : UserControl
 
     private static IDataTemplate JournalDataTemplate()
     {
-        return new FuncDataTemplate<object>((data, ns) =>
+        // Template for the top-level item (Year Group)
+        return new FuncDataTemplate<JournalGroupViewModel>((yearVm, ns) =>
         {
-            if (data is JournalGroupViewModel groupVm)
+            // ItemsControl for the months within this year
+            var monthItemsControl = new ItemsControl
             {
-                var itemsControl = new ItemsControl
-                {
-                    ItemsSource = groupVm.Journals,
-                    ItemTemplate = JournalItemTemplate(),
-                    Focusable = false
-                };
+                ItemsSource = yearVm.MonthGroups, // Bind to the collection of Month Groups
+                ItemTemplate = MonthGroupTemplate(), // Use the new template for months
+                Focusable = false // Don't let this steal focus
+            };
 
-                return new StackPanel
+            return new StackPanel // Container for the year header and its months
+            {
+                Spacing = 4,
+                Margin = new Thickness(5, 8, 5, 4), // Outer margin for the year group
+                Children =
                 {
-                    Spacing = 4,
-                    Margin = new Thickness(5, 8, 5, 4),
-                    Children =
+                    // Year Header Text
+                    new TextBlock
                     {
-                        new TextBlock
-                        {
-                            Text = groupVm.Year.ToString(),
-                            FontSize = 16,
-                            FontWeight = FontWeight.Bold,
-                            Margin = new Thickness(0, 0, 0, 5),
-                            IsEnabled = false,
-                            Cursor = Cursor.Default
-                        },
-                        itemsControl
-                    }
-                };
-            }
-            return new TextBlock { Text = "Invalid item type in ListBox" };
-        }, supportsRecycling: true);
+                        Text = yearVm.DisplayName, // Use DisplayName from JournalGroupViewModel
+                        FontSize = 16,
+                        FontWeight = FontWeight.Bold,
+                        Margin = new Thickness(0, 0, 0, 5), // Margin below year header
+                        IsEnabled = false, // Not interactive
+                        Cursor = Cursor.Default
+                    },
+                    // The list of months for this year
+                    monthItemsControl
+                }
+            };
+        }, supportsRecycling: true); // Enable recycling for performance
     }
 
+    // New Template for the Month Group level
+    private static IDataTemplate MonthGroupTemplate()
+    {
+        return new FuncDataTemplate<JournalMonthGroupViewModel>((monthVm, ns) =>
+        {
+            // ItemsControl for the journals within this month
+            var journalItemsControl = new ItemsControl
+            {
+                ItemsSource = monthVm.Journals, // Bind to the collection of Journals
+                ItemTemplate = JournalItemTemplate(), // Use the existing template for journal entries
+                Focusable = false // Don't let this steal focus
+            };
+
+            return new StackPanel // Container for the month header and its journals
+            {
+                Spacing = 2,
+                Margin = new Thickness(15, 4, 5, 4), // Indent month groups slightly
+                Children =
+                {
+                    // Month Header Text
+                    new TextBlock
+                    {
+                        Text = monthVm.DisplayName, // Use DisplayName from JournalMonthGroupViewModel
+                        FontSize = 13,
+                        FontWeight = FontWeight.SemiBold,
+                        Margin = new Thickness(0, 0, 0, 3), // Margin below month header
+                        IsEnabled = false, // Not interactive
+                        Cursor = Cursor.Default
+                    },
+                    // The list of journals for this month
+                    journalItemsControl
+                }
+            };
+        }, supportsRecycling: true); // Enable recycling
+    }
+
+
+    // Template for the final Journal Entry item (leaf node)
     private static IDataTemplate JournalItemTemplate()
     {
+        // Defines how the JournalViewModel itself is displayed within the ListBoxItem
         var textBlockTemplate = new FuncDataTemplate<JournalViewModel>((vm, ns) =>
             new TextBlock
             {
-                Text = vm.DisplayName,
+                [!TextBlock.TextProperty] = new Avalonia.Data.Binding(nameof(vm.DisplayName)), // Bind to DisplayName
                 Padding = new Thickness(0),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center
             }, supportsRecycling: true);
 
+        // Creates the actual ListBoxItem container for the JournalViewModel
         return new FuncDataTemplate<JournalViewModel>((journalVm, ns) =>
         {
             var item = new ListBoxItem
             {
-                DataContext = journalVm,
-                Content = journalVm,
-                ContentTemplate = textBlockTemplate,
-                Padding = new Thickness(15, 3, 5, 3),
+                DataContext = journalVm, // Set DataContext for binding and event handlers
+                Content = journalVm, // Content to be displayed using ContentTemplate
+                ContentTemplate = textBlockTemplate, // Use the TextBlock template above
+                Padding = new Thickness(30, 3, 5, 3), // Indent journal items further under the month
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center,
-                Cursor = new Cursor(StandardCursorType.Hand)
+                Cursor = new Cursor(StandardCursorType.Hand) // Indicate it's clickable
             };
+            // Attach event handler to detect clicks
             item.PointerPressed += JournalItem_PointerPressed;
             return item;
         },
-        supportsRecycling: true);
+        supportsRecycling: true); // Enable recycling
     }
 
     private static void JournalItem_PointerPressed(object? sender, PointerPressedEventArgs e)

@@ -295,4 +295,37 @@ public partial class MainViewModel : ViewModelBase
         }
         ChangePasswordCommand.NotifyCanExecuteChanged();
     }
+
+    [RelayCommand]
+    private async Task ShowExportDialog()
+    {
+        if (OwnerWindow == null)
+        {
+            UpdateStatusBar("Error: Cannot show export dialog, owner window not set.");
+            return;
+        }
+
+        UpdateStatusBar("Opening export dialog...");
+
+        try
+        {
+            // Pass the JournalService, current password, and owner window to the dialog VM
+            var exportViewModel = new ExportJournalsDialogViewModel(_journalService, _password, OwnerWindow);
+            var exportDialog = new ExportJournalsDialog
+            {
+                DataContext = exportViewModel
+            };
+
+            // Show the dialog modally
+            await exportDialog.ShowDialog(OwnerWindow); // We don't need a result back
+
+            UpdateStatusBar("Export dialog closed.");
+        }
+        catch (Exception ex)
+        {
+            // Log the exception details if possible
+            System.Diagnostics.Debug.WriteLine($"Error showing export dialog: {ex}");
+            UpdateStatusBar($"Error: Could not open export dialog. {ex.Message}");
+        }
+    }
 }

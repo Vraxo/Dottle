@@ -52,6 +52,27 @@ public class JournalService
         return journalEntries.OrderByDescending(je => je.Date);
     }
 
+    // New method to get all entries without year filtering
+    public IEnumerable<JournalEntry> GetAllJournalEntries()
+    {
+        var journalEntries = new List<JournalEntry>();
+        var files = Directory.EnumerateFiles(_journalDirectory, "*.txt");
+
+        foreach (var file in files)
+        {
+            string fileName = Path.GetFileNameWithoutExtension(file);
+            if (PersianCalendarHelper.TryParsePersianDateString(fileName, out DateTime date))
+            {
+                // No year filter here
+                journalEntries.Add(new JournalEntry(Path.GetFileName(file), date));
+            }
+        }
+
+        // Order all entries by date descending
+        return journalEntries.OrderByDescending(je => je.Date);
+    }
+
+
     public string? ReadJournalContent(string fileName, string password)
     {
         string filePath = Path.Combine(_journalDirectory, fileName);
