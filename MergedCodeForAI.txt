@@ -134,6 +134,89 @@ namespace Dottle
 }
 </file>
 
+<file path="Converters\BindingConverters.cs">
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using Avalonia.Data.Converters;
+using Dottle.ViewModels; // Assuming enums are in this namespace
+
+namespace Dottle.Converters;
+
+/// <summary>
+/// Converts an Enum value to true if it matches the converter parameter, otherwise false.
+/// Used for binding RadioButton IsChecked to an Enum property.
+/// </summary>
+public class EnumToBooleanConverter : IValueConverter
+{
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value == null || parameter == null)
+            return false;
+
+        // Check if the enum value matches the parameter (which should be the enum value this radio button represents)
+        return value.Equals(parameter);
+    }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        // If this radio button is checked (value is true), return its corresponding enum value (parameter)
+        if (value is true)
+            return parameter;
+
+        // Otherwise, do nothing (Avalonia handles unchecking others in the group)
+        return Avalonia.Data.BindingOperations.DoNothing;
+    }
+}
+
+/// <summary>
+/// Converts an Enum value to true (Visible) if it matches the converter parameter, otherwise false (Collapsed).
+/// </summary>
+public class EnumToVisibilityConverter : IValueConverter
+{
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value == null || parameter == null)
+            return false; // Default to not visible if values are null
+
+        // Check if the enum value matches the parameter (which should be the enum value that triggers visibility)
+        return value.Equals(parameter);
+    }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        // Conversion back is not needed for visibility
+        throw new NotImplementedException();
+    }
+}
+
+
+/// <summary>
+/// Multi-value converter to determine if the "Export as Single File" checkbox should be enabled.
+/// Enabled only if CanSelectFolder is true AND SelectedExportFormat is FullText.
+/// Expects two bindings: CanSelectFolder (bool) and SelectedExportFormat (ExportFormatType).
+/// </summary>
+public class EnableSingleFileExportConverter : IMultiValueConverter
+{
+    public object? Convert(IList<object?> values, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (values?.Count == 2 &&
+            values[0] is bool canSelectFolder &&
+            values[1] is ExportFormatType selectedFormat)
+        {
+            return canSelectFolder && selectedFormat == ExportFormatType.FullText;
+        }
+        return false; // Default to disabled if bindings aren't ready or types mismatch
+    }
+
+    // ConvertBack is not needed for IsEnabled
+    // public object[]? ConvertBack(object? value, Type[] targetTypes, object? parameter, CultureInfo culture)
+    // {
+    //     throw new NotImplementedException();
+    // }
+}
+</file>
+
 <file path="Models\JournalEntry.cs">
 namespace Dottle.Models;
 
@@ -592,8 +675,23 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dottle.Models;
 using Dottle.Services;
+using Dottle.Utils; // Needed for PersianCalendarHelper
 
 namespace Dottle.ViewModels;
+
+// Enum for Export Format Type
+public enum ExportFormatType
+{
+    FullText,
+    MoodSummary
+}
+
+// Enum for Sort Direction
+public enum SortDirection
+{
+    Ascending,
+    Descending
+}
 
 public partial class ExportJournalItemViewModel : ViewModelBase
 {
@@ -640,7 +738,14 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
     private double _exportProgress;
 
     [ObservableProperty]
-    private bool _exportAsSingleFile;
+    private bool _exportAsSingleFile = true; // Default to single file for full text
+
+    // New properties for export options
+    [ObservableProperty]
+    private ExportFormatType _selectedExportFormat = ExportFormatType.FullText;
+
+    [ObservableProperty]
+    private SortDirection _selectedSortDirection = SortDirection.Ascending;
 
     public bool CanSelectFolder => !_isExporting;
     public bool CanExport => !_isExporting && !string.IsNullOrEmpty(SelectedFolderPath) && JournalItems.Any(j => j.IsSelected);
@@ -761,19 +866,48 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         int exportedCount = 0;
         int failedCount = 0;
         int totalToExport = selectedJournals.Count;
-        string exportMode = ExportAsSingleFile ? "single file" : "multiple files";
 
-        UpdateStatus($"Starting export of {totalToExport} journals ({exportMode}) to {SelectedFolderPath}...");
+        IsExporting = true;
+        ExportProgress = 0;
+        UpdateStatus($"Starting export of {totalToExport} journals to {SelectedFolderPath}...");
 
-        if (ExportAsSingleFile)
+        try
         {
-            await ExportAsSingleFileAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+            switch (SelectedExportFormat)
+            {
+                case ExportFormatType.FullText:
+                    string exportMode = ExportAsSingleFile ? "single file" : "multiple files";
+                    UpdateStatus($"Starting Full Text export ({exportMode}) of {totalToExport} journals...");
+                    if (ExportAsSingleFile)
+                    {
+                        await ExportAsSingleFileAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+                    }
+                    else
+                    {
+                        await ExportAsMultipleFilesAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+                    }
+                    break;
+
+                case ExportFormatType.MoodSummary:
+                    UpdateStatus($"Starting Mood Summary export of {totalToExport} journals...");
+                    await ExportMoodSummaryAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+                    break;
+
+                default:
+                    UpdateStatus($"Error: Unknown export format selected.");
+                    IsExporting = false; // Reset exporting state on error
+                    break;
+            }
         }
-        else
+        catch (Exception ex)
         {
-            await ExportAsMultipleFilesAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+            UpdateStatus($"Unhandled error during export: {ex.Message}");
+            IsExporting = false; // Ensure exporting state is reset on unhandled exception
+            ExportProgress = 0; // Reset progress
         }
+        // Note: IsExporting and ExportProgress are now set within each specific export method's finally block
     }
+
 
     private async Task ExportAsSingleFileAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
     {
@@ -794,33 +928,37 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
                 if (decryptedContent != null)
                 {
-                    stringBuilder.AppendLine($"--- Entry: {journalVm.DisplayName} ({journalVm.Date:yyyy-MM-dd}) ---");
-                    stringBuilder.AppendLine(); // Add a blank line after the header
+                    // Append content directly
                     stringBuilder.AppendLine(decryptedContent);
-                    stringBuilder.AppendLine(); // Add a blank line between entries
-                    stringBuilder.AppendLine("----------------------------------------"); // Separator line
-                    stringBuilder.AppendLine(); // Add a blank line after the separator
-
+                    // Add a single blank line as a separator IF it's not the last entry
+                    if (i < totalToExport - 1)
+                    {
+                        stringBuilder.AppendLine();
+                    }
                     exportedCount++;
                 }
                 else
                 {
                     failedCount++;
                     UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
-                    stringBuilder.AppendLine($"--- Skipped Entry: {journalVm.DisplayName} (Failed to decrypt) ---");
-                    stringBuilder.AppendLine();
-                    stringBuilder.AppendLine("----------------------------------------");
-                    stringBuilder.AppendLine();
+                    stringBuilder.AppendLine($"--- Skipped: {journalVm.DisplayName} (Failed to decrypt) ---");
+                    // Add a single blank line as a separator IF it's not the last entry
+                    if (i < totalToExport - 1)
+                    {
+                        stringBuilder.AppendLine();
+                    }
                 }
             }
             catch (Exception ex)
             {
                 failedCount++;
                 UpdateStatus($"Error processing {journalVm.DisplayName}: {ex.Message}. Skipped.");
-                stringBuilder.AppendLine($"--- Skipped Entry: {journalVm.DisplayName} (Error: {ex.Message}) ---");
-                stringBuilder.AppendLine();
-                stringBuilder.AppendLine("----------------------------------------");
-                stringBuilder.AppendLine();
+                stringBuilder.AppendLine($"--- Skipped: {journalVm.DisplayName} (Error: {ex.Message}) ---");
+                // Add a single blank line as a separator IF it's not the last entry
+                if (i < totalToExport - 1)
+                {
+                    stringBuilder.AppendLine();
+                }
             }
             await Task.Delay(5); // Small delay to allow UI updates
         }
@@ -887,6 +1025,104 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         UpdateStatus($"Export complete. Exported: {exportedCount}, Failed: {failedCount}.");
     }
 
+    // Helper class for mood summary export
+    private class MoodEntry
+    {
+        public DateTime Date { get; set; }
+        public int MoodScore { get; set; }
+    }
+
+    private async Task ExportMoodSummaryAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
+    {
+        var moodEntries = new List<MoodEntry>();
+        string moodSummaryFileName = $"Dottle_MoodSummary_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt";
+        string moodSummaryFilePath = Path.Combine(SelectedFolderPath!, moodSummaryFileName);
+
+        for (int i = 0; i < totalToExport; i++)
+        {
+            var journalVm = journals[i]; // Already ordered by date ascending
+            ExportProgress = (double)(i + 1) / totalToExport * 100;
+            UpdateStatus($"Processing {i + 1}/{totalToExport}: {journalVm.DisplayName} for mood...");
+
+            try
+            {
+                string? decryptedContent = await Task.Run(() =>
+                    _journalService.ReadJournalContent(journalVm.FileName, _password));
+
+                if (decryptedContent != null)
+                {
+                    using var reader = new StringReader(decryptedContent);
+                    string? firstLine = await reader.ReadLineAsync();
+
+                    if (firstLine != null && int.TryParse(firstLine.Trim(), out int moodScore) && moodScore >= 1 && moodScore <= 5)
+                    {
+                        moodEntries.Add(new MoodEntry { Date = journalVm.Date, MoodScore = moodScore });
+                        exportedCount++;
+                    }
+                    else
+                    {
+                        failedCount++;
+                        UpdateStatus($"Warning: Could not parse mood score from {journalVm.DisplayName}. Skipped.");
+                    }
+                }
+                else
+                {
+                    failedCount++;
+                    UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
+                }
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                UpdateStatus($"Error processing {journalVm.DisplayName} for mood: {ex.Message}. Skipped.");
+            }
+            await Task.Delay(5); // Small delay for UI updates
+        }
+
+        // Sort the results based on user selection
+        var sortedEntries = SelectedSortDirection == SortDirection.Ascending
+            ? moodEntries.OrderBy(e => e.Date)
+            : moodEntries.OrderByDescending(e => e.Date);
+
+        // Build the final string
+        var stringBuilder = new StringBuilder();
+        foreach (var entry in sortedEntries)
+        {
+            string persianDate = PersianCalendarHelper.GetPersianDateString(entry.Date);
+            string emoji = GetMoodEmoji(entry.MoodScore);
+            stringBuilder.AppendLine($"{persianDate} - {entry.MoodScore} - {emoji}");
+        }
+
+        // Write to file
+        try
+        {
+            UpdateStatus($"Writing mood summary to {moodSummaryFileName}...");
+            await File.WriteAllTextAsync(moodSummaryFilePath, stringBuilder.ToString());
+            UpdateStatus($"Mood Summary export complete. {exportedCount} entries written to {moodSummaryFileName}, Failures: {failedCount}.");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Error writing mood summary file {moodSummaryFileName}: {ex.Message}");
+        }
+        finally
+        {
+            IsExporting = false;
+            ExportProgress = 100;
+        }
+    }
+
+    private string GetMoodEmoji(int moodScore)
+    {
+        return moodScore switch
+        {
+            1 => "😭", // Awful
+            2 => "😞", // Bad
+            3 => "😐", // Okay
+            4 => "😊", // Good
+            5 => "🤩", // Great (Using a different one for 5 as requested 🌈 might not render everywhere)
+            _ => "❓"  // Unknown
+        };
+    }
 
     private void UpdateStatus(string message)
     {
@@ -1635,12 +1871,21 @@ using Avalonia.Controls.Templates;
 using Avalonia.Data;
 using Avalonia.Layout;
 using Avalonia.Media;
+// using Avalonia.Data.Converters; // No longer needed directly here
+using System.Collections.Generic;
 using Dottle.ViewModels;
+using Dottle.Converters; // Add using for custom converters
 
 namespace Dottle.Views;
 
 public class ExportJournalsDialog : Window
 {
+    // --- Define Custom Converters as Static Fields ---
+    private static readonly EnumToBooleanConverter s_enumToBooleanConverter = new();
+    private static readonly EnumToVisibilityConverter s_enumToVisibilityConverter = new();
+    private static readonly EnableSingleFileExportConverter s_enableSingleFileExportConverter = new();
+
+
     public bool IsConfirmed { get; private set; } = false;
 
     public ExportJournalsDialog()
@@ -1687,14 +1932,108 @@ public class ExportJournalsDialog : Window
         };
         DockPanel.SetDock(selectFolderButton, Dock.Left);
 
+        // --- Export Format Selection ---
+        TextBlock formatLabel = new() { Text = "Export Format:", Margin = new(10, 10, 10, 0) };
+        RadioButton fullTextRadio = new()
+        {
+            Content = "Full Text",
+            GroupName = "ExportFormat",
+            Margin = new(10, 0, 5, 0),
+            IsChecked = true, // Default - Initial state, binding will take over
+            CommandParameter = ExportFormatType.FullText
+        };
+        // Use custom EnumToBooleanConverter
+        fullTextRadio.Bind(RadioButton.IsCheckedProperty, new Binding(nameof(ExportJournalsDialogViewModel.SelectedExportFormat), BindingMode.TwoWay)
+        {
+            Converter = s_enumToBooleanConverter,
+            ConverterParameter = ExportFormatType.FullText // Pass the target enum value
+        });
+
+        RadioButton moodSummaryRadio = new()
+        {
+            Content = "Mood Summary",
+            GroupName = "ExportFormat",
+            Margin = new(5, 0, 10, 0),
+            CommandParameter = ExportFormatType.MoodSummary,
+        };
+        // Use custom EnumToBooleanConverter
+        moodSummaryRadio.Bind(RadioButton.IsCheckedProperty, new Binding(nameof(ExportJournalsDialogViewModel.SelectedExportFormat), BindingMode.TwoWay)
+        {
+            Converter = s_enumToBooleanConverter,
+            ConverterParameter = ExportFormatType.MoodSummary // Pass the target enum value
+        });
+        StackPanel formatPanel = new()
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new(10, 5, 10, 5),
+            Spacing = 5,
+            Children = { fullTextRadio, moodSummaryRadio }
+        };
+
+        // --- Sort Direction Selection (Visible only for Mood Summary) ---
+        TextBlock sortLabel = new() { Text = "Sort Order (Mood Summary):", Margin = new(10, 5, 10, 0) };
+        RadioButton ascendingRadio = new()
+        {
+            Content = "Ascending",
+            GroupName = "SortDirection",
+            Margin = new(10, 0, 5, 0),
+            IsChecked = true, // Default
+            CommandParameter = SortDirection.Ascending
+        };
+        // Use custom EnumToBooleanConverter
+        ascendingRadio.Bind(RadioButton.IsCheckedProperty, new Binding(nameof(ExportJournalsDialogViewModel.SelectedSortDirection), BindingMode.TwoWay)
+        {
+            Converter = s_enumToBooleanConverter,
+            ConverterParameter = SortDirection.Ascending // Pass the target enum value
+        });
+
+        RadioButton descendingRadio = new()
+        {
+            Content = "Descending",
+            GroupName = "SortDirection",
+            Margin = new(5, 0, 10, 0),
+            CommandParameter = SortDirection.Descending,
+        };
+        // Use custom EnumToBooleanConverter
+        descendingRadio.Bind(RadioButton.IsCheckedProperty, new Binding(nameof(ExportJournalsDialogViewModel.SelectedSortDirection), BindingMode.TwoWay)
+        {
+            Converter = s_enumToBooleanConverter,
+            ConverterParameter = SortDirection.Descending // Pass the target enum value
+        });
+        StackPanel sortPanel = new()
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new(10, 5, 10, 5),
+            Spacing = 5,
+            Children = { ascendingRadio, descendingRadio },
+        };
+        // Use custom EnumToVisibilityConverter
+        sortPanel.Bind(StackPanel.IsVisibleProperty, new Binding(nameof(ExportJournalsDialogViewModel.SelectedExportFormat))
+        {
+            Converter = s_enumToVisibilityConverter,
+            ConverterParameter = ExportFormatType.MoodSummary // Make visible when format is MoodSummary
+        });
+
+        // --- Existing CheckBox ---
         CheckBox exportSingleFileCheckBox = new()
         {
-            Content = "Export selected journals into a single file",
-            Margin = new(10, 10, 10, 5),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            [!CheckBox.IsCheckedProperty] = new Binding(nameof(ExportJournalsDialogViewModel.ExportAsSingleFile), BindingMode.TwoWay),
-            [!CheckBox.IsEnabledProperty] = new Binding(nameof(ExportJournalsDialogViewModel.CanSelectFolder))
+            Content = "Export selected journals into a single file (Full Text only)",
+            Margin = new(10, 5, 10, 5), // Adjusted margin
+            HorizontalAlignment = HorizontalAlignment.Left
+            // Bind IsChecked directly without converter first
         };
+        exportSingleFileCheckBox.Bind(CheckBox.IsCheckedProperty, new Binding(nameof(ExportJournalsDialogViewModel.ExportAsSingleFile), BindingMode.TwoWay));
+
+        // Use custom EnableSingleFileExportConverter
+        exportSingleFileCheckBox.Bind(CheckBox.IsEnabledProperty, new MultiBinding
+        {
+            Bindings =
+                {
+                    new Binding(nameof(ExportJournalsDialogViewModel.CanSelectFolder)),
+                    new Binding(nameof(ExportJournalsDialogViewModel.SelectedExportFormat))
+                },
+            Converter = s_enableSingleFileExportConverter // Use the custom multi-converter
+        });
 
         ProgressBar progressBar = new()
         {
@@ -1747,7 +2086,10 @@ public class ExportJournalsDialog : Window
                 buttonPanel,
                 statusTextBlock,
                 progressBar,
-                exportSingleFileCheckBox,
+                exportSingleFileCheckBox, // Checkbox now below sort panel
+                sortPanel,                // Sort options
+                formatLabel,              // Format label
+                formatPanel,              // Format options
                 folderPanel,
                 journalListBox
             }
@@ -1757,9 +2099,15 @@ public class ExportJournalsDialog : Window
         DockPanel.SetDock(statusTextBlock, Dock.Bottom);
         DockPanel.SetDock(progressBar, Dock.Bottom);
         DockPanel.SetDock(exportSingleFileCheckBox, Dock.Bottom);
+        DockPanel.SetDock(sortPanel, Dock.Bottom);
+        DockPanel.SetDock(formatPanel, Dock.Bottom);
+        DockPanel.SetDock(formatLabel, Dock.Bottom);
         DockPanel.SetDock(folderPanel, Dock.Bottom);
 
         Content = mainPanel;
+
+        // Ensure DataContext is set if not done elsewhere (usually in App.xaml or code-behind)
+        // this.DataContext = new ExportJournalsDialogViewModel(...); // Assuming instantiation happens elsewhere
     }
 
     public new void Close(object? result = null)

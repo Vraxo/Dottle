@@ -7,8 +7,26 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dottle.Models;
 using Dottle.Services;
+using Dottle.Utils;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace Dottle.ViewModels;
+
+public enum ExportFormatType
+{
+    FullText,
+    MoodSummary
+}
+
+public enum SortDirection
+{
+    Ascending,
+    Descending
+}
 
 public partial class ExportJournalItemViewModel : ViewModelBase
 {
@@ -55,7 +73,13 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
     private double _exportProgress;
 
     [ObservableProperty]
-    private bool _exportAsSingleFile;
+    private bool _exportAsSingleFile = true;
+
+    [ObservableProperty]
+    private ExportFormatType _selectedExportFormat = ExportFormatType.FullText;
+
+    [ObservableProperty]
+    private SortDirection _selectedSortDirection = SortDirection.Ascending;
 
     public bool CanSelectFolder => !_isExporting;
     public bool CanExport => !_isExporting && !string.IsNullOrEmpty(SelectedFolderPath) && JournalItems.Any(j => j.IsSelected);
@@ -159,7 +183,6 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
             return;
         }
 
-        // Order selected journals by date ascending for single file export consistency
         var selectedJournals = JournalItems
             .Where(j => j.IsSelected)
             .OrderBy(j => j.Date)
@@ -176,22 +199,49 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         int exportedCount = 0;
         int failedCount = 0;
         int totalToExport = selectedJournals.Count;
-        string exportMode = ExportAsSingleFile ? "single file" : "multiple files";
 
-        UpdateStatus($"Starting export of {totalToExport} journals ({exportMode}) to {SelectedFolderPath}...");
+        UpdateStatus($"Starting export of {totalToExport} journals to {SelectedFolderPath}...");
 
-        if (ExportAsSingleFile)
+        try
         {
-            await ExportAsSingleFileAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+            switch (SelectedExportFormat)
+            {
+                case ExportFormatType.FullText:
+                    string exportMode = ExportAsSingleFile ? "single file" : "multiple files";
+                    UpdateStatus($"Starting Full Text export ({exportMode}) of {totalToExport} journals...");
+                    if (ExportAsSingleFile)
+                    {
+                        await ExportAsSingleFileAsync(selectedJournals, totalToExport);
+                    }
+                    else
+                    {
+                        await ExportAsMultipleFilesAsync(selectedJournals, totalToExport);
+                    }
+                    break;
+
+                case ExportFormatType.MoodSummary:
+                    UpdateStatus($"Starting Mood Summary export of {totalToExport} journals...");
+                    await ExportMoodSummaryAsync(selectedJournals, totalToExport);
+                    break;
+
+                default:
+                    UpdateStatus($"Error: Unknown export format selected.");
+                    IsExporting = false;
+                    break;
+            }
         }
-        else
+        catch (Exception ex)
         {
-            await ExportAsMultipleFilesAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+            UpdateStatus($"Unhandled error during export: {ex.Message}");
+            IsExporting = false;
+            ExportProgress = 0;
         }
     }
 
-    private async Task ExportAsSingleFileAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
+    private async Task ExportAsSingleFileAsync(List<ExportJournalItemViewModel> journals, int totalToExport)
     {
+        int exportedCount = 0;
+        int failedCount = 0;
         var stringBuilder = new StringBuilder();
         string singleFileName = $"Dottle_Export_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt";
         string singleFilePath = Path.Combine(SelectedFolderPath!, singleFileName);
@@ -209,9 +259,7 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
                 if (decryptedContent != null)
                 {
-                    // Append content directly
                     stringBuilder.AppendLine(decryptedContent);
-                    // Add a single blank line as a separator IF it's not the last entry
                     if (i < totalToExport - 1)
                     {
                         stringBuilder.AppendLine();
@@ -223,7 +271,6 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
                     failedCount++;
                     UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
                     stringBuilder.AppendLine($"--- Skipped: {journalVm.DisplayName} (Failed to decrypt) ---");
-                    // Add a single blank line as a separator IF it's not the last entry
                     if (i < totalToExport - 1)
                     {
                         stringBuilder.AppendLine();
@@ -235,13 +282,12 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
                 failedCount++;
                 UpdateStatus($"Error processing {journalVm.DisplayName}: {ex.Message}. Skipped.");
                 stringBuilder.AppendLine($"--- Skipped: {journalVm.DisplayName} (Error: {ex.Message}) ---");
-                // Add a single blank line as a separator IF it's not the last entry
                 if (i < totalToExport - 1)
                 {
                     stringBuilder.AppendLine();
                 }
             }
-            await Task.Delay(5); // Small delay to allow UI updates
+            await Task.Delay(5);
         }
 
         try
@@ -253,7 +299,6 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         catch (Exception ex)
         {
             UpdateStatus($"Error writing aggregated file {singleFileName}: {ex.Message}");
-            // In this case, all content might be lost
         }
         finally
         {
@@ -262,11 +307,14 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         }
     }
 
-    private async Task ExportAsMultipleFilesAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
+    private async Task ExportAsMultipleFilesAsync(List<ExportJournalItemViewModel> journals, int totalToExport)
     {
+        int exportedCount = 0;
+        int failedCount = 0;
+
         for (int i = 0; i < totalToExport; i++)
         {
-            var journalVm = journals[i]; // Still ordered by date due to initial sorting
+            var journalVm = journals[i];
             UpdateStatus($"Exporting {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
             ExportProgress = (double)(i + 1) / totalToExport * 100;
 
@@ -277,11 +325,9 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
                 if (decryptedContent != null)
                 {
-                    // Keep original filename but ensure .txt extension
                     string outputFileName = Path.ChangeExtension(journalVm.FileName, ".txt");
                     string outputPath = Path.Combine(SelectedFolderPath!, outputFileName);
 
-                    // Ensure directory exists (though SelectedFolderPath should)
                     Directory.CreateDirectory(SelectedFolderPath!);
 
                     await File.WriteAllTextAsync(outputPath, decryptedContent);
@@ -298,7 +344,7 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
                 failedCount++;
                 UpdateStatus($"Error exporting {journalVm.DisplayName}: {ex.Message}. Skipped.");
             }
-            await Task.Delay(10); // Keep small delay
+            await Task.Delay(10);
         }
 
         IsExporting = false;
@@ -306,12 +352,126 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         UpdateStatus($"Export complete. Exported: {exportedCount}, Failed: {failedCount}.");
     }
 
+    private class MoodEntry
+    {
+        public DateTime Date { get; set; }
+        public int MoodScore { get; set; }
+    }
+
+    private async Task ExportMoodSummaryAsync(List<ExportJournalItemViewModel> journals, int totalToExport)
+    {
+        int exportedCount = 0;
+        int failedCount = 0;
+        var moodEntries = new List<MoodEntry>();
+        string moodSummaryFileName = $"Dottle_MoodSummary_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt";
+        string moodSummaryFilePath = Path.Combine(SelectedFolderPath!, moodSummaryFileName);
+
+        for (int i = 0; i < totalToExport; i++)
+        {
+            var journalVm = journals[i];
+            ExportProgress = (double)(i + 1) / totalToExport * 100;
+            UpdateStatus($"Processing {i + 1}/{totalToExport}: {journalVm.DisplayName} for mood...");
+
+            try
+            {
+                string? decryptedContent = await Task.Run(() =>
+                    _journalService.ReadJournalContent(journalVm.FileName, _password));
+
+                if (decryptedContent != null)
+                {
+                    using var reader = new StringReader(decryptedContent);
+                    string? firstLine = await reader.ReadLineAsync();
+
+                    if (firstLine != null)
+                    {
+                        var parts = firstLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length > 0 && int.TryParse(parts[^1], out int moodScore) && moodScore >= 1 && moodScore <= 5)
+                        {
+                            moodEntries.Add(new MoodEntry { Date = journalVm.Date, MoodScore = moodScore });
+                            exportedCount++;
+                        }
+                        else
+                        {
+                            failedCount++;
+                            UpdateStatus($"Warning: Could not parse mood score from header of {journalVm.DisplayName}. Skipped.");
+                        }
+                    }
+                    else
+                    {
+                        failedCount++;
+                        UpdateStatus($"Warning: File {journalVm.DisplayName} is empty or could not read first line. Skipped.");
+                    }
+                }
+                else
+                {
+                    failedCount++;
+                    UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
+                }
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                UpdateStatus($"Error processing {journalVm.DisplayName} for mood: {ex.Message}. Skipped.");
+            }
+            await Task.Delay(5);
+        }
+
+        var sortedEntries = SelectedSortDirection == SortDirection.Ascending
+            ? moodEntries.OrderBy(e => e.Date)
+            : moodEntries.OrderByDescending(e => e.Date);
+
+        var stringBuilder = new StringBuilder();
+        foreach (var entry in sortedEntries)
+        {
+            string persianDate = PersianCalendarHelper.GetPersianDateString(entry.Date);
+            string emoji = GetMoodEmoji(entry.MoodScore);
+            stringBuilder.AppendLine($"{persianDate} - {entry.MoodScore} - {emoji}");
+        }
+
+        try
+        {
+            UpdateStatus($"Writing mood summary to {moodSummaryFileName}...");
+            await File.WriteAllTextAsync(moodSummaryFilePath, stringBuilder.ToString());
+            UpdateStatus($"Mood Summary export complete. {exportedCount} entries written to {moodSummaryFileName}, Failures: {failedCount}.");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Error writing mood summary file {moodSummaryFileName}: {ex.Message}");
+        }
+        finally
+        {
+            IsExporting = false;
+            ExportProgress = 100;
+        }
+    }
+
+    private static string GetMoodEmoji(int moodScore)
+    {
+        return moodScore switch
+        {
+            1 => "🌩️",
+            2 => "🌧️",
+            3 => "🌥️",
+            4 => "☀️",
+            5 => "🌈",
+            _ => "❓"
+        };
+    }
 
     private void UpdateStatus(string message)
     {
         StatusMessage = $"{DateTime.Now:HH:mm:ss} - {message}";
     }
 
-    [RelayCommand] private void Confirm() { /* Logic handled by View closing dialog */ }
-    [RelayCommand] private void Cancel() { /* Logic handled by View closing dialog */ }
+    [RelayCommand] 
+    private static void Confirm() 
+    { 
+
+    }
+
+    [RelayCommand] 
+    private static void Cancel() 
+    {
+
+    }
 }
