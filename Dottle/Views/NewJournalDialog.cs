@@ -1,13 +1,11 @@
-﻿using Avalonia;
+﻿using System.ComponentModel;
+using System.Windows.Input;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Dottle.ViewModels;
-using System;
-using System.ComponentModel;
-using System.Linq; // Required for OfType
-using System.Windows.Input;
 
 namespace Dottle.Views;
 

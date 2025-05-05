@@ -3,9 +3,9 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Styling;          // Required for RequestedThemeVariant, Application.Styles
 using Avalonia.Themes.Fluent;    // Required for FluentTheme
+using Dottle.Services;
 using Dottle.ViewModels;
 using Dottle.Views;
-using Dottle.Services;
 // using System; // Check if needed - likely not directly
 
 namespace Dottle;

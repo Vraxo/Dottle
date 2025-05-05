@@ -4,9 +4,9 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Styling;          // Required for RequestedThemeVariant, Application.Styles
 using Avalonia.Themes.Fluent;    // Required for FluentTheme
+using Dottle.Services;
 using Dottle.ViewModels;
 using Dottle.Views;
-using Dottle.Services;
 // using System; // Check if needed - likely not directly
 
 namespace Dottle;
@@ -82,9 +82,6 @@ public class App : Application
 
 <file path="Program.cs">
 using Avalonia;
-using Avalonia.Reactive; // Although not explicitly using ReactiveUI features, it's often included by default templates
-using System;
-using System.Reflection.PortableExecutable;
 
 namespace Dottle;
 
@@ -104,7 +101,6 @@ internal sealed class Program
 </file>
 
 <file path="ViewLocator.cs">
-using System;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Dottle.ViewModels;
@@ -150,8 +146,6 @@ public class JournalEntry(string fileName, DateTime date)
 </file>
 
 <file path="Services\EncryptionService.cs">
-using System;
-using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -255,15 +249,9 @@ public class EncryptionService
 </file>
 
 <file path="Services\JournalService.cs">
-using System;
-using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
-using System.Linq;
-using System.Text;
 using Dottle.Models;
 using Dottle.Utils;
-using System.Globalization;
 
 namespace Dottle.Services;
 
@@ -440,7 +428,6 @@ public class JournalService
 </file>
 
 <file path="Utils\PersianCalendarHelper.cs">
-using System;
 using System.Globalization;
 using System.Text.RegularExpressions;
 
@@ -533,7 +520,6 @@ public static partial class PersianCalendarHelper
 <file path="ViewModels\ChangePasswordDialogViewModel.cs">
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using System.Threading.Tasks; // Required for Task
 
 namespace Dottle.ViewModels;
 
@@ -597,22 +583,18 @@ public partial class ChangePasswordDialogViewModel : ViewModelBase
 </file>
 
 <file path="ViewModels\ExportJournalsDialogViewModel.cs">
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Text;
 using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dottle.Models;
 using Dottle.Services;
-using System;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace Dottle.ViewModels;
 
-// ViewModel for an individual journal entry in the export list
 public partial class ExportJournalItemViewModel : ViewModelBase
 {
     [ObservableProperty]
@@ -621,11 +603,12 @@ public partial class ExportJournalItemViewModel : ViewModelBase
     public JournalEntry Journal { get; }
     public string DisplayName => Journal.DisplayName;
     public string FileName => Journal.FileName;
+    public DateTime Date => Journal.Date;
 
     public ExportJournalItemViewModel(JournalEntry journal)
     {
         Journal = journal;
-        _isSelected = true; // Default to selected
+        _isSelected = true;
     }
 }
 
@@ -639,26 +622,34 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
     private ObservableCollection<ExportJournalItemViewModel> _journalItems = new();
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanExport))]
+    [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
     private string? _selectedFolderPath;
 
     [ObservableProperty]
     private string? _statusMessage;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanSelectFolder))]
+    [NotifyPropertyChangedFor(nameof(CanExport))]
+    [NotifyCanExecuteChangedFor(nameof(SelectFolderCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
     private bool _isExporting;
 
     [ObservableProperty]
     private double _exportProgress;
 
+    [ObservableProperty]
+    private bool _exportAsSingleFile;
+
     public bool CanSelectFolder => !_isExporting;
     public bool CanExport => !_isExporting && !string.IsNullOrEmpty(SelectedFolderPath) && JournalItems.Any(j => j.IsSelected);
 
-    // Constructor requires the service, password, and owner window for dialogs
     public ExportJournalsDialogViewModel(JournalService journalService, string password, Window? owner)
     {
         _journalService = journalService;
         _password = password;
-        _owner = owner; // Needed for FolderPicker
+        _owner = owner;
 
         LoadAllJournals();
         UpdateStatus("Ready to export.");
@@ -666,13 +657,23 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
     private void LoadAllJournals()
     {
+        foreach (var oldItem in JournalItems)
+        {
+            oldItem.PropertyChanged -= JournalItem_PropertyChanged;
+        }
+
         try
         {
-            // Get *all* journal entries, regardless of year filter in MainViewModel
             var allEntries = _journalService.GetAllJournalEntries();
             var itemViewModels = allEntries
-                .OrderByDescending(e => e.Date) // Order by date descending
-                .Select(entry => new ExportJournalItemViewModel(entry));
+                .OrderByDescending(e => e.Date)
+                .Select(entry => new ExportJournalItemViewModel(entry))
+                .ToList();
+
+            foreach (var newItem in itemViewModels)
+            {
+                newItem.PropertyChanged += JournalItem_PropertyChanged;
+            }
 
             JournalItems = new ObservableCollection<ExportJournalItemViewModel>(itemViewModels);
             UpdateStatus($"Loaded {JournalItems.Count} journals.");
@@ -680,28 +681,21 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         catch (Exception ex)
         {
             UpdateStatus($"Error loading journals: {ex.Message}");
-            // Handle error appropriately, maybe disable export
+            JournalItems.Clear();
         }
+
+        OnPropertyChanged(nameof(CanExport));
         SelectFolderCommand.NotifyCanExecuteChanged();
         ExportCommand.NotifyCanExecuteChanged();
     }
 
-    partial void OnIsExportingChanged(bool value)
+    private void JournalItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        // Update CanExecute for commands when IsExporting changes
-        SelectFolderCommand.NotifyCanExecuteChanged();
-        ExportCommand.NotifyCanExecuteChanged();
-        // Also update the individual item selection state if needed
-        foreach (var item in JournalItems)
+        if (e.PropertyName == nameof(ExportJournalItemViewModel.IsSelected))
         {
-            // Optionally disable checkboxes during export
-            // item.RaisePropertyChanged(nameof(item.IsEnabled)); // Assuming an IsEnabled property exists
+            OnPropertyChanged(nameof(CanExport));
+            ExportCommand.NotifyCanExecuteChanged();
         }
-    }
-
-    partial void OnSelectedFolderPathChanged(string? value)
-    {
-        ExportCommand.NotifyCanExecuteChanged();
     }
 
     [RelayCommand(CanExecute = nameof(CanSelectFolder))]
@@ -723,8 +717,6 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
         if (result.Count > 0)
         {
-            // Use TryGetUri(out Uri? uri) or TryGetLocalPath() depending on platform needs
-            // For simplicity, assuming TryGetLocalPath() works for typical desktop scenarios.
             string? path = result[0].TryGetLocalPath();
             if (!string.IsNullOrEmpty(path))
             {
@@ -733,9 +725,8 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
             }
             else
             {
-                // Handle cases where local path isn't directly available (e.g., cloud storage)
                 UpdateStatus("Error: Could not get a local path for the selected folder.");
-                SelectedFolderPath = null; // Clear if invalid
+                SelectedFolderPath = null;
             }
         }
         else
@@ -753,7 +744,12 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
             return;
         }
 
-        var selectedJournals = JournalItems.Where(j => j.IsSelected).ToList();
+        // Order selected journals by date ascending for single file export consistency
+        var selectedJournals = JournalItems
+            .Where(j => j.IsSelected)
+            .OrderBy(j => j.Date)
+            .ToList();
+
         if (!selectedJournals.Any())
         {
             UpdateStatus("No journals selected for export.");
@@ -765,48 +761,125 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         int exportedCount = 0;
         int failedCount = 0;
         int totalToExport = selectedJournals.Count;
+        string exportMode = ExportAsSingleFile ? "single file" : "multiple files";
 
-        UpdateStatus($"Starting export of {totalToExport} journals to {SelectedFolderPath}...");
+        UpdateStatus($"Starting export of {totalToExport} journals ({exportMode}) to {SelectedFolderPath}...");
+
+        if (ExportAsSingleFile)
+        {
+            await ExportAsSingleFileAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+        }
+        else
+        {
+            await ExportAsMultipleFilesAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+        }
+    }
+
+    private async Task ExportAsSingleFileAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
+    {
+        var stringBuilder = new StringBuilder();
+        string singleFileName = $"Dottle_Export_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt";
+        string singleFilePath = Path.Combine(SelectedFolderPath!, singleFileName);
 
         for (int i = 0; i < totalToExport; i++)
         {
-            var journalVm = selectedJournals[i];
-            UpdateStatus($"Exporting {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
+            var journalVm = journals[i];
             ExportProgress = (double)(i + 1) / totalToExport * 100;
+            UpdateStatus($"Processing {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
 
             try
             {
-                // Read encrypted content
-                string? encryptedContent = await Task.Run(() =>
+                string? decryptedContent = await Task.Run(() =>
                     _journalService.ReadJournalContent(journalVm.FileName, _password));
 
-                if (encryptedContent != null)
+                if (decryptedContent != null)
                 {
-                    // Construct output path
-                    string outputFileName = Path.ChangeExtension(journalVm.FileName, ".txt");
-                    string outputPath = Path.Combine(SelectedFolderPath, outputFileName);
+                    stringBuilder.AppendLine($"--- Entry: {journalVm.DisplayName} ({journalVm.Date:yyyy-MM-dd}) ---");
+                    stringBuilder.AppendLine(); // Add a blank line after the header
+                    stringBuilder.AppendLine(decryptedContent);
+                    stringBuilder.AppendLine(); // Add a blank line between entries
+                    stringBuilder.AppendLine("----------------------------------------"); // Separator line
+                    stringBuilder.AppendLine(); // Add a blank line after the separator
 
-                    // Ensure directory exists (should already, but good practice)
-                    Directory.CreateDirectory(SelectedFolderPath);
-
-                    // Write decrypted content
-                    await File.WriteAllTextAsync(outputPath, encryptedContent);
                     exportedCount++;
                 }
                 else
                 {
                     failedCount++;
                     UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
-                    // Log this failure more permanently if needed
+                    stringBuilder.AppendLine($"--- Skipped Entry: {journalVm.DisplayName} (Failed to decrypt) ---");
+                    stringBuilder.AppendLine();
+                    stringBuilder.AppendLine("----------------------------------------");
+                    stringBuilder.AppendLine();
+                }
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                UpdateStatus($"Error processing {journalVm.DisplayName}: {ex.Message}. Skipped.");
+                stringBuilder.AppendLine($"--- Skipped Entry: {journalVm.DisplayName} (Error: {ex.Message}) ---");
+                stringBuilder.AppendLine();
+                stringBuilder.AppendLine("----------------------------------------");
+                stringBuilder.AppendLine();
+            }
+            await Task.Delay(5); // Small delay to allow UI updates
+        }
+
+        try
+        {
+            UpdateStatus($"Writing aggregated content to {singleFileName}...");
+            await File.WriteAllTextAsync(singleFilePath, stringBuilder.ToString());
+            UpdateStatus($"Export complete. {exportedCount} journals written to {singleFileName}, Failures: {failedCount}.");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Error writing aggregated file {singleFileName}: {ex.Message}");
+            // In this case, all content might be lost
+        }
+        finally
+        {
+            IsExporting = false;
+            ExportProgress = 100;
+        }
+    }
+
+    private async Task ExportAsMultipleFilesAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
+    {
+        for (int i = 0; i < totalToExport; i++)
+        {
+            var journalVm = journals[i]; // Still ordered by date due to initial sorting
+            UpdateStatus($"Exporting {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
+            ExportProgress = (double)(i + 1) / totalToExport * 100;
+
+            try
+            {
+                string? decryptedContent = await Task.Run(() =>
+                    _journalService.ReadJournalContent(journalVm.FileName, _password));
+
+                if (decryptedContent != null)
+                {
+                    // Keep original filename but ensure .txt extension
+                    string outputFileName = Path.ChangeExtension(journalVm.FileName, ".txt");
+                    string outputPath = Path.Combine(SelectedFolderPath!, outputFileName);
+
+                    // Ensure directory exists (though SelectedFolderPath should)
+                    Directory.CreateDirectory(SelectedFolderPath!);
+
+                    await File.WriteAllTextAsync(outputPath, decryptedContent);
+                    exportedCount++;
+                }
+                else
+                {
+                    failedCount++;
+                    UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
                 }
             }
             catch (Exception ex)
             {
                 failedCount++;
                 UpdateStatus($"Error exporting {journalVm.DisplayName}: {ex.Message}. Skipped.");
-                // Log this error
             }
-            await Task.Delay(10); // Small delay for UI responsiveness
+            await Task.Delay(10); // Keep small delay
         }
 
         IsExporting = false;
@@ -814,12 +887,12 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         UpdateStatus($"Export complete. Exported: {exportedCount}, Failed: {failedCount}.");
     }
 
+
     private void UpdateStatus(string message)
     {
         StatusMessage = $"{DateTime.Now:HH:mm:ss} - {message}";
     }
 
-    // Commands for the dialog buttons (handled by the View closing the dialog)
     [RelayCommand] private void Confirm() { /* Logic handled by View closing dialog */ }
     [RelayCommand] private void Cancel() { /* Logic handled by View closing dialog */ }
 }
@@ -827,7 +900,6 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
 <file path="ViewModels\JournalGroupViewModel.cs">
 using System.Collections.ObjectModel;
-using System.Linq;
 
 namespace Dottle.ViewModels;
 
@@ -850,7 +922,6 @@ public partial class JournalGroupViewModel : ViewModelBase
 
 <file path="ViewModels\JournalMonthGroupViewModel.cs">
 using System.Collections.ObjectModel;
-using System.Linq;
 using Dottle.Utils; // Assuming PersianCalendarHelper is here
 
 namespace Dottle.ViewModels;
@@ -951,17 +1022,13 @@ public partial class LoginViewModel : ViewModelBase
 </file>
 
 <file path="ViewModels\MainViewModel.cs">
+using System.Collections.ObjectModel;
 using Avalonia.Controls;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Dottle.Models;
 using Dottle.Services;
 using Dottle.Utils;
 using Dottle.Views;
-using System;
-using System.Collections.ObjectModel;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace Dottle.ViewModels;
 
@@ -1295,13 +1362,9 @@ namespace Dottle.ViewModels
 </file>
 
 <file path="ViewModels\NewJournalDialogViewModel.cs">
-using Avalonia.Controls;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dottle.Utils;
-using System;
-using System.Collections.Generic; // Required for List
-using System.Linq; // Required for Any
 
 namespace Dottle.ViewModels;
 
@@ -1376,16 +1439,14 @@ public abstract class ViewModelBase : ObservableObject
 </file>
 
 <file path="Views\ChangePasswordDialog.cs">
+using System.ComponentModel;
+using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity; // Required for RoutedEventArgs
 using Avalonia.Layout;
 using Avalonia.Media;
 using Dottle.ViewModels;
-using System;
-using System.ComponentModel;
-using System.Threading.Tasks; // Added for async command execution check
-using System.Windows.Input;
 
 namespace Dottle.Views;
 
@@ -1573,7 +1634,6 @@ using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Data;
 using Avalonia.Layout;
-using Avalonia.Markup.Xaml.Templates;
 using Avalonia.Media;
 using Dottle.ViewModels;
 
@@ -1587,51 +1647,56 @@ public class ExportJournalsDialog : Window
     {
         Title = "Export Journals";
         Width = 500;
-        Height = 600;
+        Height = 630;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
-        CanResize = false; // Keep it simple for now
+        CanResize = false;
 
-        // --- UI Elements ---
-
-        // Journal ListBox
-        var journalListBox = new ListBox
+        ListBox journalListBox = new()
         {
-            Height = 300, // Fixed height for the list
-            Margin = new Thickness(10),
+            Height = 300,
+            Margin = new(10),
             ItemTemplate = new FuncDataTemplate<ExportJournalItemViewModel>((vm, ns) =>
                 new CheckBox
                 {
                     Content = vm.DisplayName,
                     [!CheckBox.IsCheckedProperty] = new Binding(nameof(vm.IsSelected), BindingMode.TwoWay),
-                    // Optionally bind IsEnabled to !vm.Parent.IsExporting if needed
                 }, supportsRecycling: true),
             [!ItemsControl.ItemsSourceProperty] = new Binding(nameof(ExportJournalsDialogViewModel.JournalItems))
         };
 
-        // Folder Selection Area
-        var folderPathTextBlock = new TextBlock
+        TextBlock folderPathTextBlock = new()
         {
-            Margin = new Thickness(10, 0, 0, 0),
+            Margin = new(10, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             [!TextBlock.TextProperty] = new Binding(nameof(ExportJournalsDialogViewModel.SelectedFolderPath)) { FallbackValue = "No folder selected" }
         };
-        var selectFolderButton = new Button
+
+        Button selectFolderButton = new()
         {
             Content = "Select Folder...",
-            Margin = new Thickness(10, 5, 10, 5),
+            Margin = new(10, 5, 10, 5),
             HorizontalAlignment = HorizontalAlignment.Left,
             [!Button.CommandProperty] = new Binding(nameof(ExportJournalsDialogViewModel.SelectFolderCommand)),
             [!Button.IsEnabledProperty] = new Binding(nameof(ExportJournalsDialogViewModel.CanSelectFolder))
         };
-        var folderPanel = new DockPanel
+
+        DockPanel folderPanel = new()
         {
             Margin = new Thickness(10, 0),
             Children = { selectFolderButton, folderPathTextBlock }
         };
         DockPanel.SetDock(selectFolderButton, Dock.Left);
 
-        // Progress Bar
-        var progressBar = new ProgressBar
+        CheckBox exportSingleFileCheckBox = new()
+        {
+            Content = "Export selected journals into a single file",
+            Margin = new(10, 10, 10, 5),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            [!CheckBox.IsCheckedProperty] = new Binding(nameof(ExportJournalsDialogViewModel.ExportAsSingleFile), BindingMode.TwoWay),
+            [!CheckBox.IsEnabledProperty] = new Binding(nameof(ExportJournalsDialogViewModel.CanSelectFolder))
+        };
+
+        ProgressBar progressBar = new()
         {
             Margin = new Thickness(10, 5),
             Minimum = 0,
@@ -1640,8 +1705,7 @@ public class ExportJournalsDialog : Window
             [!ProgressBar.IsVisibleProperty] = new Binding(nameof(ExportJournalsDialogViewModel.IsExporting))
         };
 
-        // Status TextBlock
-        var statusTextBlock = new TextBlock
+        TextBlock statusTextBlock = new()
         {
             Margin = new Thickness(10, 0, 10, 5),
             FontSize = 11,
@@ -1649,83 +1713,71 @@ public class ExportJournalsDialog : Window
             [!TextBlock.TextProperty] = new Binding(nameof(ExportJournalsDialogViewModel.StatusMessage))
         };
 
-        // Buttons (Export / Close)
-        var exportButton = new Button
+        Button exportButton = new()
         {
             Content = "Export Selected",
             HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(5),
+            Margin = new(5),
             Classes = { "accent" },
             [!Button.CommandProperty] = new Binding(nameof(ExportJournalsDialogViewModel.ExportCommand)),
             [!Button.IsEnabledProperty] = new Binding(nameof(ExportJournalsDialogViewModel.CanExport))
         };
-        var closeButton = new Button
+
+        Button closeButton = new()
         {
             Content = "Close",
             HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(5)
+            Margin = new(5)
         };
-        closeButton.Click += (s, e) => Close(false); // Always close with false result
+        closeButton.Click += (s, e) => Close(false);
 
-        var buttonPanel = new StackPanel
+        StackPanel buttonPanel = new()
         {
             Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(10),
+            Margin = new(10),
             Spacing = 5,
             Children = { exportButton, closeButton }
         };
 
-        // --- Layout ---
-        var mainPanel = new DockPanel
+        DockPanel mainPanel = new()
         {
             Children =
             {
-                buttonPanel, // Bottom
-                statusTextBlock, // Above buttons
-                progressBar, // Above status
-                folderPanel, // Above progress
-                journalListBox // Top, fills remaining space
+                buttonPanel,
+                statusTextBlock,
+                progressBar,
+                exportSingleFileCheckBox,
+                folderPanel,
+                journalListBox
             }
         };
 
         DockPanel.SetDock(buttonPanel, Dock.Bottom);
         DockPanel.SetDock(statusTextBlock, Dock.Bottom);
         DockPanel.SetDock(progressBar, Dock.Bottom);
+        DockPanel.SetDock(exportSingleFileCheckBox, Dock.Bottom);
         DockPanel.SetDock(folderPanel, Dock.Bottom);
-        // journalListBox fills the rest
 
         Content = mainPanel;
-
-        // Close window when DataContext signals completion (optional, Close button is primary)
-        this.DataContextChanged += (s, e) =>
-        {
-            if (DataContext is ExportJournalsDialogViewModel vm)
-            {
-                // Could potentially close automatically after export, but manual close is safer
-            }
-        };
     }
 
-    // Override Close to manage the result if needed, though not strictly necessary here
     public new void Close(object? result = null)
     {
-        // We don't really need a result from this dialog, but keeping the pattern
         base.Close(result);
     }
 }
 </file>
 
 <file path="Views\LoginView.cs">
+using System.ComponentModel; // Required for PropertyChangedEventArgs
+using System.Windows.Input; // Required for ICommand
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity; // Required for RoutedEventArgs
 using Avalonia.Layout;
 using Avalonia.Media;
 using Dottle.ViewModels;
-using System; // Required for EventArgs
-using System.ComponentModel; // Required for PropertyChangedEventArgs
-using System.Windows.Input; // Required for ICommand
 
 namespace Dottle.Views;
 
@@ -1931,9 +1983,10 @@ public sealed class LoginView : UserControl
 </file>
 
 <file path="Views\MainView.cs">
+using System.ComponentModel;
+using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -1942,12 +1995,6 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Dottle.ViewModels;
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Linq;
-using System.Threading.Tasks;
-using System.Windows.Input;
 
 namespace Dottle.Views;
 
@@ -2240,9 +2287,9 @@ public sealed class MainView : UserControl
         }
         else
         {
-             System.Diagnostics.Debug.WriteLine("Cannot execute ShowExportDialogCommand.");
-             // Optionally update status bar or show a message
-             // _viewModel?.UpdateStatusBar("Cannot open export dialog right now.");
+            System.Diagnostics.Debug.WriteLine("Cannot execute ShowExportDialogCommand.");
+            // Optionally update status bar or show a message
+            // _viewModel?.UpdateStatusBar("Cannot open export dialog right now.");
         }
     }
 
@@ -2322,9 +2369,9 @@ public sealed class MainView : UserControl
             else
             {
                 // If journal item container not realized yet, scroll it into view
-                 journalItemsControl.ScrollIntoView(newSelection);
-                 Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
-                 return; // Exit for now, will retry after scroll
+                journalItemsControl.ScrollIntoView(newSelection);
+                Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                return; // Exit for now, will retry after scroll
             }
         }
     }
@@ -2526,16 +2573,14 @@ namespace Dottle.Views
 </file>
 
 <file path="Views\NewJournalDialog.cs">
+using System.ComponentModel;
+using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Dottle.ViewModels;
-using System;
-using System.ComponentModel;
-using System.Linq; // Required for OfType
-using System.Windows.Input;
 
 namespace Dottle.Views;
 

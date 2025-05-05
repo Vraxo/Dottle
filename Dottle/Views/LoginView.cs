@@ -1,12 +1,11 @@
-﻿using Avalonia;
+﻿using System.ComponentModel; // Required for PropertyChangedEventArgs
+using System.Windows.Input; // Required for ICommand
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity; // Required for RoutedEventArgs
 using Avalonia.Layout;
 using Avalonia.Media;
 using Dottle.ViewModels;
-using System; // Required for EventArgs
-using System.ComponentModel; // Required for PropertyChangedEventArgs
-using System.Windows.Input; // Required for ICommand
 
 namespace Dottle.Views;
 

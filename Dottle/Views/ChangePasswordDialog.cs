@@ -1,13 +1,11 @@
-﻿using Avalonia;
+﻿using System.ComponentModel;
+using System.Windows.Input;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity; // Required for RoutedEventArgs
 using Avalonia.Layout;
 using Avalonia.Media;
 using Dottle.ViewModels;
-using System;
-using System.ComponentModel;
-using System.Threading.Tasks; // Added for async command execution check
-using System.Windows.Input;
 
 namespace Dottle.Views;
 

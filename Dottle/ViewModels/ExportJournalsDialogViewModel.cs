@@ -1,16 +1,12 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Text;
 using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dottle.Models;
 using Dottle.Services;
-using System;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.ComponentModel;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace Dottle.ViewModels;
 
@@ -22,6 +18,7 @@ public partial class ExportJournalItemViewModel : ViewModelBase
     public JournalEntry Journal { get; }
     public string DisplayName => Journal.DisplayName;
     public string FileName => Journal.FileName;
+    public DateTime Date => Journal.Date;
 
     public ExportJournalItemViewModel(JournalEntry journal)
     {
@@ -40,8 +37,8 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
     private ObservableCollection<ExportJournalItemViewModel> _journalItems = new();
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanExport))] // Notify CanExport when path changes
-    [NotifyCanExecuteChangedFor(nameof(ExportCommand))] // Notify command too
+    [NotifyPropertyChangedFor(nameof(CanExport))]
+    [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
     private string? _selectedFolderPath;
 
     [ObservableProperty]
@@ -56,6 +53,9 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
     [ObservableProperty]
     private double _exportProgress;
+
+    [ObservableProperty]
+    private bool _exportAsSingleFile;
 
     public bool CanSelectFolder => !_isExporting;
     public bool CanExport => !_isExporting && !string.IsNullOrEmpty(SelectedFolderPath) && JournalItems.Any(j => j.IsSelected);
@@ -72,7 +72,6 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
     private void LoadAllJournals()
     {
-        // Unsubscribe from previous items if any
         foreach (var oldItem in JournalItems)
         {
             oldItem.PropertyChanged -= JournalItem_PropertyChanged;
@@ -84,9 +83,8 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
             var itemViewModels = allEntries
                 .OrderByDescending(e => e.Date)
                 .Select(entry => new ExportJournalItemViewModel(entry))
-                .ToList(); // Create list first
+                .ToList();
 
-            // Subscribe to PropertyChanged for each new item
             foreach (var newItem in itemViewModels)
             {
                 newItem.PropertyChanged += JournalItem_PropertyChanged;
@@ -98,21 +96,18 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         catch (Exception ex)
         {
             UpdateStatus($"Error loading journals: {ex.Message}");
-            JournalItems.Clear(); // Clear collection on error
+            JournalItems.Clear();
         }
 
-        // Explicitly notify after loading/clearing
         OnPropertyChanged(nameof(CanExport));
         SelectFolderCommand.NotifyCanExecuteChanged();
         ExportCommand.NotifyCanExecuteChanged();
     }
 
-    // Handler for PropertyChanged on individual Journal items
     private void JournalItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(ExportJournalItemViewModel.IsSelected))
         {
-            // Re-evaluate CanExport and notify the command when selection changes
             OnPropertyChanged(nameof(CanExport));
             ExportCommand.NotifyCanExecuteChanged();
         }
@@ -153,7 +148,6 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         {
             UpdateStatus("Folder selection cancelled.");
         }
-        // CanExecute properties/commands are notified via [Notify...] attributes on SelectedFolderPath
     }
 
     [RelayCommand(CanExecute = nameof(CanExport))]
@@ -165,7 +159,12 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
             return;
         }
 
-        var selectedJournals = JournalItems.Where(j => j.IsSelected).ToList();
+        // Order selected journals by date ascending for single file export consistency
+        var selectedJournals = JournalItems
+            .Where(j => j.IsSelected)
+            .OrderBy(j => j.Date)
+            .ToList();
+
         if (!selectedJournals.Any())
         {
             UpdateStatus("No journals selected for export.");
@@ -177,28 +176,115 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         int exportedCount = 0;
         int failedCount = 0;
         int totalToExport = selectedJournals.Count;
+        string exportMode = ExportAsSingleFile ? "single file" : "multiple files";
 
-        UpdateStatus($"Starting export of {totalToExport} journals to {SelectedFolderPath}...");
+        UpdateStatus($"Starting export of {totalToExport} journals ({exportMode}) to {SelectedFolderPath}...");
+
+        if (ExportAsSingleFile)
+        {
+            await ExportAsSingleFileAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+        }
+        else
+        {
+            await ExportAsMultipleFilesAsync(selectedJournals, totalToExport, exportedCount, failedCount);
+        }
+    }
+
+    private async Task ExportAsSingleFileAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
+    {
+        var stringBuilder = new StringBuilder();
+        string singleFileName = $"Dottle_Export_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt";
+        string singleFilePath = Path.Combine(SelectedFolderPath!, singleFileName);
 
         for (int i = 0; i < totalToExport; i++)
         {
-            var journalVm = selectedJournals[i];
+            var journalVm = journals[i];
+            ExportProgress = (double)(i + 1) / totalToExport * 100;
+            UpdateStatus($"Processing {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
+
+            try
+            {
+                string? decryptedContent = await Task.Run(() =>
+                    _journalService.ReadJournalContent(journalVm.FileName, _password));
+
+                if (decryptedContent != null)
+                {
+                    // Append content directly
+                    stringBuilder.AppendLine(decryptedContent);
+                    // Add a single blank line as a separator IF it's not the last entry
+                    if (i < totalToExport - 1)
+                    {
+                        stringBuilder.AppendLine();
+                    }
+                    exportedCount++;
+                }
+                else
+                {
+                    failedCount++;
+                    UpdateStatus($"Warning: Failed to read/decrypt {journalVm.DisplayName}. Skipped.");
+                    stringBuilder.AppendLine($"--- Skipped: {journalVm.DisplayName} (Failed to decrypt) ---");
+                    // Add a single blank line as a separator IF it's not the last entry
+                    if (i < totalToExport - 1)
+                    {
+                        stringBuilder.AppendLine();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                UpdateStatus($"Error processing {journalVm.DisplayName}: {ex.Message}. Skipped.");
+                stringBuilder.AppendLine($"--- Skipped: {journalVm.DisplayName} (Error: {ex.Message}) ---");
+                // Add a single blank line as a separator IF it's not the last entry
+                if (i < totalToExport - 1)
+                {
+                    stringBuilder.AppendLine();
+                }
+            }
+            await Task.Delay(5); // Small delay to allow UI updates
+        }
+
+        try
+        {
+            UpdateStatus($"Writing aggregated content to {singleFileName}...");
+            await File.WriteAllTextAsync(singleFilePath, stringBuilder.ToString());
+            UpdateStatus($"Export complete. {exportedCount} journals written to {singleFileName}, Failures: {failedCount}.");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Error writing aggregated file {singleFileName}: {ex.Message}");
+            // In this case, all content might be lost
+        }
+        finally
+        {
+            IsExporting = false;
+            ExportProgress = 100;
+        }
+    }
+
+    private async Task ExportAsMultipleFilesAsync(List<ExportJournalItemViewModel> journals, int totalToExport, int exportedCount, int failedCount)
+    {
+        for (int i = 0; i < totalToExport; i++)
+        {
+            var journalVm = journals[i]; // Still ordered by date due to initial sorting
             UpdateStatus($"Exporting {i + 1}/{totalToExport}: {journalVm.DisplayName}...");
             ExportProgress = (double)(i + 1) / totalToExport * 100;
 
             try
             {
-                string? encryptedContent = await Task.Run(() =>
+                string? decryptedContent = await Task.Run(() =>
                     _journalService.ReadJournalContent(journalVm.FileName, _password));
 
-                if (encryptedContent != null)
+                if (decryptedContent != null)
                 {
+                    // Keep original filename but ensure .txt extension
                     string outputFileName = Path.ChangeExtension(journalVm.FileName, ".txt");
-                    string outputPath = Path.Combine(SelectedFolderPath, outputFileName);
+                    string outputPath = Path.Combine(SelectedFolderPath!, outputFileName);
 
-                    Directory.CreateDirectory(SelectedFolderPath);
+                    // Ensure directory exists (though SelectedFolderPath should)
+                    Directory.CreateDirectory(SelectedFolderPath!);
 
-                    await File.WriteAllTextAsync(outputPath, encryptedContent);
+                    await File.WriteAllTextAsync(outputPath, decryptedContent);
                     exportedCount++;
                 }
                 else
@@ -212,13 +298,14 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
                 failedCount++;
                 UpdateStatus($"Error exporting {journalVm.DisplayName}: {ex.Message}. Skipped.");
             }
-            await Task.Delay(10);
+            await Task.Delay(10); // Keep small delay
         }
 
         IsExporting = false;
         ExportProgress = 100;
         UpdateStatus($"Export complete. Exported: {exportedCount}, Failed: {failedCount}.");
     }
+
 
     private void UpdateStatus(string message)
     {
@@ -227,16 +314,4 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
     [RelayCommand] private void Confirm() { /* Logic handled by View closing dialog */ }
     [RelayCommand] private void Cancel() { /* Logic handled by View closing dialog */ }
-
-    // Consider adding cleanup if the ViewModel has a longer lifecycle
-    // For a dialog, it's usually less critical as it gets garbage collected.
-    // Example (if needed):
-    // public void Cleanup()
-    // {
-    //     foreach (var item in JournalItems)
-    //     {
-    //         item.PropertyChanged -= JournalItem_PropertyChanged;
-    //     }
-    //     JournalItems.Clear();
-    // }
 }

@@ -1,7 +1,4 @@
 ﻿using Avalonia;
-using Avalonia.Reactive; // Although not explicitly using ReactiveUI features, it's often included by default templates
-using System;
-using System.Reflection.PortableExecutable;
 
 namespace Dottle;
 

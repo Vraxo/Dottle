@@ -1,10 +1,6 @@
-﻿using Avalonia.Controls;
-using CommunityToolkit.Mvvm.ComponentModel;
+﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dottle.Utils;
-using System;
-using System.Collections.Generic; // Required for List
-using System.Linq; // Required for Any
 
 namespace Dottle.ViewModels;
 

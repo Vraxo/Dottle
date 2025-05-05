@@ -1,6 +1,7 @@
-﻿using Avalonia;
+﻿using System.ComponentModel;
+using System.Windows.Input;
+using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -9,12 +10,6 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Dottle.ViewModels;
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Linq;
-using System.Threading.Tasks;
-using System.Windows.Input;
 
 namespace Dottle.Views;
 
@@ -307,9 +302,9 @@ public sealed class MainView : UserControl
         }
         else
         {
-             System.Diagnostics.Debug.WriteLine("Cannot execute ShowExportDialogCommand.");
-             // Optionally update status bar or show a message
-             // _viewModel?.UpdateStatusBar("Cannot open export dialog right now.");
+            System.Diagnostics.Debug.WriteLine("Cannot execute ShowExportDialogCommand.");
+            // Optionally update status bar or show a message
+            // _viewModel?.UpdateStatusBar("Cannot open export dialog right now.");
         }
     }
 
@@ -389,9 +384,9 @@ public sealed class MainView : UserControl
             else
             {
                 // If journal item container not realized yet, scroll it into view
-                 journalItemsControl.ScrollIntoView(newSelection);
-                 Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
-                 return; // Exit for now, will retry after scroll
+                journalItemsControl.ScrollIntoView(newSelection);
+                Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
+                return; // Exit for now, will retry after scroll
             }
         }
     }
