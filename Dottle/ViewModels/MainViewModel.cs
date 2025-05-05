@@ -1,7 +1,11 @@
-﻿using System.Collections.ObjectModel;
+﻿using System;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Dottle.Models;
 using Dottle.Services;
 using Dottle.Utils;
 using Dottle.Views;
@@ -11,6 +15,7 @@ namespace Dottle.ViewModels;
 public partial class MainViewModel : ViewModelBase
 {
     private readonly JournalService _journalService;
+    private readonly SettingsService _settingsService; // Added SettingsService
     private string _password;
 
     [ObservableProperty]
@@ -55,14 +60,20 @@ public partial class MainViewModel : ViewModelBase
     [NotifyCanExecuteChangedFor(nameof(ChangePasswordCommand))]
     private bool _isChangingPassword;
 
+    // Needs to be set by the View or App logic after the Window is created.
     public Window? OwnerWindow { get; set; }
 
     public bool IsJournalSelected => SelectedJournal != null;
 
-    public MainViewModel(JournalService journalService, string password)
+    // Constructor updated to accept SettingsService
+    public MainViewModel(JournalService journalService, SettingsService settingsService, string password)
     {
         _journalService = journalService;
+        _settingsService = settingsService; // Store injected service
         _password = password;
+
+        _settingsService.SettingsChanged += SettingsService_SettingsChanged; // Subscribe to changes
+
         LoadJournalList();
         UpdateStatusBar($"Journals loaded. Directory: {_journalService.GetJournalDirectoryPath()}");
     }
@@ -74,30 +85,31 @@ public partial class MainViewModel : ViewModelBase
 
     private void LoadJournalList()
     {
-        var entries = _journalService.GetJournalEntries(); // Already filtered by current year
+        var entries = _journalService.GetJournalEntries();
         var viewModels = entries.Select(e => new JournalViewModel(e)).ToList();
 
         var groups = viewModels
-            .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date)) // Group by Year
+            .GroupBy(jvm => PersianCalendarHelper.GetPersianYear(jvm.Date))
             .Select(yearGroup =>
             {
                 var monthGroups = yearGroup
-                    .GroupBy(jvm => PersianCalendarHelper.GetPersianMonth(jvm.Date)) // Group by Month within Year
+                    .GroupBy(jvm => PersianCalendarHelper.GetPersianMonth(jvm.Date))
                     .Select(monthGroup => new JournalMonthGroupViewModel(
                         yearGroup.Key,
                         monthGroup.Key,
-                        monthGroup.ToList())) // Create Month Group VM
-                    .OrderByDescending(mg => mg.Month); // Order months within the year
+                        monthGroup.ToList()))
+                    .OrderByDescending(mg => mg.Month);
 
-                return new JournalGroupViewModel(yearGroup.Key, monthGroups); // Create Year Group VM
+                return new JournalGroupViewModel(yearGroup.Key, monthGroups);
             })
-            .OrderByDescending(g => g.Year); // Order years
+            .OrderByDescending(g => g.Year);
 
         JournalGroups = new ObservableCollection<JournalGroupViewModel>(groups);
 
-        SelectedJournal = null;
-        CurrentJournalContent = string.Empty;
-        UpdateStatusBar("Journal list refreshed (Current Year Only).");
+        // Don't reset selection if list is refreshed due to settings change
+        // SelectedJournal = null;
+        // CurrentJournalContent = string.Empty;
+        UpdateStatusBar($"Journal list refreshed. Source: {_journalService.GetJournalDirectoryPath()}");
     }
 
     private async void LoadSelectedJournalContent()
@@ -179,34 +191,38 @@ public partial class MainViewModel : ViewModelBase
             DataContext = dialogViewModel
         };
 
-        bool? dialogResult = await dialog.ShowDialog<bool?>(OwnerWindow);
+        await dialog.ShowDialog<bool?>(OwnerWindow); // Use await without result check simplifies logic
 
-        if (dialogResult == true && dialog.IsConfirmed)
+        if (dialog.IsConfirmed) // Check custom property on dialog
         {
             DateTime selectedDate = dialog.SelectedDate;
-            string selectedMood = dialog.SelectedMood; // Get mood from dialog
+            string selectedMood = dialog.SelectedMood;
             string dateString = PersianCalendarHelper.GetPersianDateString(selectedDate);
             UpdateStatusBar($"Creating journal for {dateString} with mood {selectedMood}...");
 
-            // Pass mood to service
             string? newFileName = await Task.Run(() =>
                 _journalService.CreateNewJournal(selectedDate, selectedMood, _password));
 
             if (newFileName != null)
             {
-                LoadJournalList();
+                LoadJournalList(); // Refresh list
                 var newEntryVm = FindJournalViewModelByFileName(newFileName);
-                SelectedJournal = newEntryVm;
+                SelectedJournal = newEntryVm; // Auto-select new entry
                 UpdateStatusBar($"Created and selected journal for {dateString}.");
             }
             else
             {
-                UpdateStatusBar($"Journal for {dateString} already exists or could not be created.");
-                string existingFileName = $"{dateString}.txt";
+                // Handle case where journal already exists or creation failed
+                string existingFileName = $"{PersianCalendarHelper.GetPersianDateString(selectedDate)}.txt";
                 var existingEntryVm = FindJournalViewModelByFileName(existingFileName);
-                if (existingEntryVm != null && SelectedJournal != existingEntryVm)
+                if (existingEntryVm != null)
                 {
-                    SelectedJournal = existingEntryVm;
+                    SelectedJournal = existingEntryVm; // Select existing if found
+                    UpdateStatusBar($"Journal for {dateString} already exists. Selected existing entry.");
+                }
+                else
+                {
+                    UpdateStatusBar($"Error: Could not create or find journal for {dateString}.");
                 }
             }
         }
@@ -219,7 +235,6 @@ public partial class MainViewModel : ViewModelBase
 
     private JournalViewModel? FindJournalViewModelByFileName(string fileName)
     {
-        // Search through the new nested structure: Year -> Month -> Journal
         return JournalGroups
             .SelectMany(yearGroup => yearGroup.MonthGroups)
             .SelectMany(monthGroup => monthGroup.Journals)
@@ -233,11 +248,8 @@ public partial class MainViewModel : ViewModelBase
 
     private bool CanChangePassword()
     {
-        return !string.IsNullOrEmpty(CurrentPasswordForChange) &&
-               !string.IsNullOrEmpty(NewPassword) &&
-               NewPassword == ConfirmNewPassword &&
-               NewPassword != CurrentPasswordForChange &&
-               !IsChangingPassword;
+        // Simplified validation - more robust checks in the command execution
+        return !IsChangingPassword;
     }
 
     [RelayCommand(CanExecute = nameof(CanChangePassword))]
@@ -245,10 +257,11 @@ public partial class MainViewModel : ViewModelBase
     {
         ChangePasswordErrorMessage = null;
 
-        if (CurrentPasswordForChange != _password)
+        if (string.IsNullOrEmpty(CurrentPasswordForChange) || CurrentPasswordForChange != _password)
         {
-            ChangePasswordErrorMessage = "The Current Password provided does not match the active password.";
+            ChangePasswordErrorMessage = "The Current Password provided does not match the active password or is empty.";
             UpdateStatusBar("Password change failed: Incorrect current password.");
+            // Clear the fields after failure? Maybe not, let user correct.
             return;
         }
 
@@ -267,7 +280,7 @@ public partial class MainViewModel : ViewModelBase
 
         IsChangingPassword = true;
         UpdateStatusBar("Changing password and re-encrypting all journals... Please wait.");
-        await Task.Delay(50);
+        await Task.Delay(50); // Allow UI to update
 
         bool success = await Task.Run(() =>
             _journalService.ChangeEncryptionPassword(_password, NewPassword!));
@@ -276,20 +289,26 @@ public partial class MainViewModel : ViewModelBase
 
         if (success)
         {
-            _password = NewPassword!;
+            _password = NewPassword!; // Update the active password
+
+            // Clear fields after successful change
             CurrentPasswordForChange = null;
             NewPassword = null;
             ConfirmNewPassword = null;
             ChangePasswordErrorMessage = null;
+
             UpdateStatusBar("Password changed successfully. All journals re-encrypted.");
+            // Reload content if a journal was selected, as it needs the new password
             if (SelectedJournal is not null) LoadSelectedJournalContent();
         }
         else
         {
             ChangePasswordErrorMessage = "Critical Error: Failed to re-encrypt one or more journals. Password has NOT been changed.";
             UpdateStatusBar("Error changing password. See error message. Password remains unchanged.");
+            // Do not clear fields on critical failure
         }
-        ChangePasswordCommand.NotifyCanExecuteChanged();
+        // Explicitly notify CanExecuteChanged for dependent properties if needed,
+        // but IsChangingPassword handles the main enable/disable state via NotifyCanExecuteChangedFor.
     }
 
     [RelayCommand]
@@ -305,23 +324,75 @@ public partial class MainViewModel : ViewModelBase
 
         try
         {
-            // Pass the JournalService, current password, and owner window to the dialog VM
             var exportViewModel = new ExportJournalsDialogViewModel(_journalService, _password, OwnerWindow);
             var exportDialog = new ExportJournalsDialog
             {
                 DataContext = exportViewModel
             };
 
-            // Show the dialog modally
-            await exportDialog.ShowDialog(OwnerWindow); // We don't need a result back
+            await exportDialog.ShowDialog(OwnerWindow);
 
             UpdateStatusBar("Export dialog closed.");
         }
         catch (Exception ex)
         {
-            // Log the exception details if possible
             System.Diagnostics.Debug.WriteLine($"Error showing export dialog: {ex}");
             UpdateStatusBar($"Error: Could not open export dialog. {ex.Message}");
+        }
+    }
+
+    // New Command to show the Settings Dialog
+    [RelayCommand]
+    private async Task ShowSettingsDialog()
+    {
+        if (OwnerWindow == null)
+        {
+            UpdateStatusBar("Error: Cannot show settings dialog, owner window not set.");
+            return;
+        }
+
+        UpdateStatusBar("Opening settings dialog...");
+
+        try
+        {
+            // Create ViewModel, passing required services
+            var settingsViewModel = new SettingsViewModel(_settingsService, _journalService);
+            var settingsDialog = new SettingsDialog
+            {
+                DataContext = settingsViewModel
+                // OwnerWindow is set by the dialog's code-behind OnDataContextChanged
+            };
+
+            await settingsDialog.ShowDialog(OwnerWindow);
+
+            UpdateStatusBar("Settings dialog closed.");
+            // Journal list is refreshed automatically via SettingsChanged event
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Error showing settings dialog: {ex}");
+            UpdateStatusBar($"Error: Could not open settings dialog. {ex.Message}");
+        }
+    }
+
+    // Event handler for settings changes (specifically journal path)
+    private void SettingsService_SettingsChanged(object? sender, EventArgs e)
+    {
+        // The journal path might have changed, reload the list
+        Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() => {
+            SelectedJournal = null; // Deselect journal as the list is changing
+            CurrentJournalContent = string.Empty; // Clear editor
+            LoadJournalList();
+            UpdateStatusBar($"Settings changed. Journal list refreshed from: {_journalService.GetJournalDirectoryPath()}");
+        });
+    }
+
+    // Ensure cleanup
+    public void Cleanup()
+    {
+        if (_settingsService != null)
+        {
+            _settingsService.SettingsChanged -= SettingsService_SettingsChanged;
         }
     }
 }

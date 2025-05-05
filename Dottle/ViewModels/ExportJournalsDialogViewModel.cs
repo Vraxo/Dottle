@@ -8,41 +8,18 @@ using CommunityToolkit.Mvvm.Input;
 using Dottle.Models;
 using Dottle.Services;
 using Dottle.Utils;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace Dottle.ViewModels;
 
-public enum ExportFormatType
-{
-    FullText,
-    MoodSummary
-}
-
-public enum SortDirection
-{
-    Ascending,
-    Descending
-}
-
-public partial class ExportJournalItemViewModel : ViewModelBase
+public partial class ExportJournalItemViewModel(JournalEntry journal) : ViewModelBase
 {
     [ObservableProperty]
-    private bool _isSelected;
+    private bool _isSelected = true;
 
-    public JournalEntry Journal { get; }
+    public JournalEntry Journal { get; } = journal;
     public string DisplayName => Journal.DisplayName;
     public string FileName => Journal.FileName;
     public DateTime Date => Journal.Date;
-
-    public ExportJournalItemViewModel(JournalEntry journal)
-    {
-        Journal = journal;
-        _isSelected = true;
-    }
 }
 
 public partial class ExportJournalsDialogViewModel : ViewModelBase
@@ -81,7 +58,7 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
     [ObservableProperty]
     private SortDirection _selectedSortDirection = SortDirection.Ascending;
 
-    public bool CanSelectFolder => !_isExporting;
+    public bool CanSelectFolder => !IsExporting;
     public bool CanExport => !_isExporting && !string.IsNullOrEmpty(SelectedFolderPath) && JournalItems.Any(j => j.IsSelected);
 
     public ExportJournalsDialogViewModel(JournalService journalService, string password, Window? owner)
@@ -103,18 +80,18 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
 
         try
         {
-            var allEntries = _journalService.GetAllJournalEntries();
-            var itemViewModels = allEntries
+            IEnumerable<JournalEntry> allEntries = _journalService.GetAllJournalEntries();
+            List<ExportJournalItemViewModel> itemViewModels = allEntries
                 .OrderByDescending(e => e.Date)
                 .Select(entry => new ExportJournalItemViewModel(entry))
                 .ToList();
 
-            foreach (var newItem in itemViewModels)
+            foreach (ExportJournalItemViewModel newItem in itemViewModels)
             {
                 newItem.PropertyChanged += JournalItem_PropertyChanged;
             }
 
-            JournalItems = new ObservableCollection<ExportJournalItemViewModel>(itemViewModels);
+            JournalItems = new(itemViewModels);
             UpdateStatus($"Loaded {JournalItems.Count} journals.");
         }
         catch (Exception ex)
@@ -352,17 +329,11 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
         UpdateStatus($"Export complete. Exported: {exportedCount}, Failed: {failedCount}.");
     }
 
-    private class MoodEntry
-    {
-        public DateTime Date { get; set; }
-        public int MoodScore { get; set; }
-    }
-
     private async Task ExportMoodSummaryAsync(List<ExportJournalItemViewModel> journals, int totalToExport)
     {
         int exportedCount = 0;
         int failedCount = 0;
-        var moodEntries = new List<MoodEntry>();
+        List<MoodEntry> moodEntries = new();
         string moodSummaryFileName = $"Dottle_MoodSummary_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt";
         string moodSummaryFilePath = Path.Combine(SelectedFolderPath!, moodSummaryFileName);
 
@@ -377,7 +348,7 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
                 string? decryptedContent = await Task.Run(() =>
                     _journalService.ReadJournalContent(journalVm.FileName, _password));
 
-                if (decryptedContent != null)
+                if (decryptedContent is not null)
                 {
                     using var reader = new StringReader(decryptedContent);
                     string? firstLine = await reader.ReadLineAsync();
@@ -420,8 +391,9 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
             ? moodEntries.OrderBy(e => e.Date)
             : moodEntries.OrderByDescending(e => e.Date);
 
-        var stringBuilder = new StringBuilder();
-        foreach (var entry in sortedEntries)
+        StringBuilder stringBuilder = new();
+
+        foreach (MoodEntry? entry in sortedEntries)
         {
             string persianDate = PersianCalendarHelper.GetPersianDateString(entry.Date);
             string emoji = GetMoodEmoji(entry.MoodScore);
@@ -473,5 +445,11 @@ public partial class ExportJournalsDialogViewModel : ViewModelBase
     private static void Cancel() 
     {
 
+    }
+
+    private class MoodEntry
+    {
+        public DateTime Date { get; set; }
+        public int MoodScore { get; set; }
     }
 }

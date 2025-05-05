@@ -1,8 +1,12 @@
-﻿using System.ComponentModel;
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Linq;
 using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
+using Avalonia.Data; // Required for Binding
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
@@ -23,9 +27,10 @@ public sealed class MainView : UserControl
     private readonly Menu _menuBar;
 
     private MainViewModel? _viewModel;
-    // Renamed command reference field
     private ICommand? _requestNewJournalDateCommand;
     private ICommand? _saveJournalCommand;
+    private ICommand? _showExportDialogCommand; // Added field
+    private ICommand? _showSettingsDialogCommand; // Added field
 
     private bool _isSyncingText = false;
     private ListBoxItem? _currentlySelectedListBoxItem = null;
@@ -35,12 +40,19 @@ public sealed class MainView : UserControl
         this.DataContextChanged += OnDataContextChangedHandler;
 
         var exportJournalsMenuItem = new MenuItem { Header = "Export Journals..." };
-        exportJournalsMenuItem.Click += ExportJournalsMenuItem_Click; // Placeholder handler
+        // Binding command replaces click handler
+        // exportJournalsMenuItem.Click += ExportJournalsMenuItem_Click;
+        exportJournalsMenuItem.CommandParameter = null; // Explicitly null if no parameter needed
+        // Bind command in OnDataContextChangedHandler or via direct binding if VM is available early
+
+        var settingsMenuItem = new MenuItem { Header = "Settings..." };
+        // Bind command in OnDataContextChangedHandler
+        settingsMenuItem.CommandParameter = null;
 
         var fileMenu = new MenuItem
         {
             Header = "_File",
-            Items = { exportJournalsMenuItem }
+            Items = { exportJournalsMenuItem, new Separator(), settingsMenuItem } // Added Settings
         };
 
         var changePasswordMenuItem = new MenuItem { Header = "Change Password..." };
@@ -54,7 +66,7 @@ public sealed class MainView : UserControl
 
         _menuBar = new Menu
         {
-            Items = { fileMenu, securityMenu } // Add fileMenu here
+            Items = { fileMenu, securityMenu }
         };
         DockPanel.SetDock(_menuBar, Dock.Top);
 
@@ -63,10 +75,10 @@ public sealed class MainView : UserControl
             Content = "New Journal",
             HorizontalAlignment = HorizontalAlignment.Stretch,
             Margin = new Thickness(5),
-            IsEnabled = false // Initial state, enabled by VM command CanExecute
+            IsEnabled = false
         };
         DockPanel.SetDock(_newButton, Dock.Top);
-        _newButton.Click += NewButton_Click; // Click handler executes the VM command
+        _newButton.Click += NewButton_Click;
 
         _journalListBox = new ListBox
         {
@@ -74,6 +86,7 @@ public sealed class MainView : UserControl
             ItemTemplate = JournalDataTemplate(),
             SelectionMode = SelectionMode.Single
         };
+        // ItemsSource binding happens in OnDataContextChangedHandler
 
         var journalListScrollViewer = new ScrollViewer { Content = _journalListBox };
         var leftDockPanel = new DockPanel { Children = { _newButton, journalListScrollViewer } };
@@ -119,6 +132,8 @@ public sealed class MainView : UserControl
             FontSize = 11,
             VerticalAlignment = VerticalAlignment.Center
         };
+        // Text binding happens in OnDataContextChangedHandler
+
         var bottomBorder = new Border
         {
             Background = SolidColorBrush.Parse("#2a2a2a"),
@@ -141,15 +156,23 @@ public sealed class MainView : UserControl
         mainDockPanel.Children.Add(contentGrid);
 
         Content = mainDockPanel;
+
+        // --- Bindings Setup ---
+        // Bind status bar text
+        this[!TextBlock.TextProperty] = new Binding(nameof(MainViewModel.StatusBarText))
+        {
+            Source = _statusBarTextBlock // Target the actual TextBlock
+            // Path defaults to DataContext property if Source not set, but explicit better here
+        };
+        // Need to set DataContext early or re-apply bindings in OnDataContextChanged
+
     }
 
-    // Get owner window reference when attached
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
         if (_viewModel != null)
         {
-            // Pass owner window ref to VM for dialogs
             _viewModel.OwnerWindow = this.VisualRoot as Window;
         }
     }
@@ -160,43 +183,71 @@ public sealed class MainView : UserControl
         if (_viewModel != null)
         {
             _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
-            _viewModel.OwnerWindow = null; // Clear owner reference
+            _viewModel.OwnerWindow = null;
+            _viewModel.Cleanup(); // Call cleanup method on old VM
         }
 
         _viewModel = DataContext as MainViewModel;
-        // Reset command references
         _requestNewJournalDateCommand = null;
         _saveJournalCommand = null;
+        _showExportDialogCommand = null; // Reset command ref
+        _showSettingsDialogCommand = null; // Reset command ref
         _currentlySelectedListBoxItem = null;
+
 
         if (_viewModel != null)
         {
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
-            // Fetch correct command reference
             _requestNewJournalDateCommand = _viewModel.RequestNewJournalDateCommand;
             _saveJournalCommand = _viewModel.SaveJournalCommand;
+            _showExportDialogCommand = _viewModel.ShowExportDialogCommand; // Get command ref
+            _showSettingsDialogCommand = _viewModel.ShowSettingsDialogCommand; // Get command ref
 
-            // Set owner window ref on VM if we are already attached
+            // Bind menu items to commands
+            var fileMenu = _menuBar.Items.OfType<MenuItem>().FirstOrDefault(m => m.Header?.ToString()?.Contains("File") ?? false);
+            if (fileMenu != null)
+            {
+                var exportItem = fileMenu.Items.OfType<MenuItem>().FirstOrDefault(i => i.Header?.ToString()?.Contains("Export") ?? false);
+                if (exportItem != null) exportItem.Command = _showExportDialogCommand;
+
+                var settingsItem = fileMenu.Items.OfType<MenuItem>().FirstOrDefault(i => i.Header?.ToString()?.Contains("Settings") ?? false);
+                if (settingsItem != null) settingsItem.Command = _showSettingsDialogCommand;
+            }
+
+            // Set owner window ref on VM if attached
             if (this.IsAttachedToVisualTree())
             {
                 _viewModel.OwnerWindow = this.VisualRoot as Window;
             }
 
-            UpdateJournalList(_viewModel.JournalGroups);
+            // Bind ItemsSource and Text properties explicitly
+            _journalListBox.ItemsSource = _viewModel.JournalGroups;
+            _statusBarTextBlock.Text = _viewModel.StatusBarText; // Initial set
+            // Re-bind status bar text in case DataContext changes post-initialization
+            _statusBarTextBlock[!TextBlock.TextProperty] = new Binding(nameof(MainViewModel.StatusBarText));
+
+
+            // Update View state based on initial VM state
+            // UpdateJournalList(_viewModel.JournalGroups); // ItemsSource binding handles this
             UpdateEditorText(_viewModel.CurrentJournalContent);
             UpdateVisualSelection(_viewModel.SelectedJournal);
             UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
-            UpdateStatusBar(_viewModel.StatusBarText);
-            UpdateNewButtonState(); // Update state based on new command
+            // UpdateStatusBar(_viewModel.StatusBarText); // Text binding handles this
+            UpdateNewButtonState();
             UpdateSaveButtonState();
         }
         else
         {
-            UpdateJournalList(null);
+            // Clear view state if ViewModel is null
+            _journalListBox.ItemsSource = null;
+            _statusBarTextBlock.Text = string.Empty;
+            _statusBarTextBlock[!TextBlock.TextProperty] = (IBinding)BindingOperations.DoNothing; // Clear binding
+
+
             UpdateEditorText(null);
             UpdateVisualSelection(null);
             UpdateEditorState(false, false);
-            UpdateStatusBar(null);
+            // UpdateStatusBar(null); // Handled by clearing text
             UpdateNewButtonState();
             UpdateSaveButtonState();
         }
@@ -206,36 +257,44 @@ public sealed class MainView : UserControl
     {
         if (_viewModel == null) return;
 
+        // Dispatch UI updates to the UI thread if necessary, though Avalonia often handles this
+        // for bindings. Manual updates might need Dispatcher.UIThread.InvokeAsync.
+
         switch (e.PropertyName)
         {
             case nameof(MainViewModel.JournalGroups):
-                UpdateJournalList(_viewModel.JournalGroups);
+                // ItemsSource binding handles update, but selection needs refresh
                 UpdateVisualSelection(_viewModel.SelectedJournal);
                 break;
             case nameof(MainViewModel.SelectedJournal):
                 UpdateVisualSelection(_viewModel.SelectedJournal);
                 UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
                 UpdateSaveButtonState();
-                UpdateEditorText(_viewModel.CurrentJournalContent);
+                UpdateEditorText(_viewModel.CurrentJournalContent); // Load content for new selection
                 break;
             case nameof(MainViewModel.CurrentJournalContent):
-                UpdateEditorText(_viewModel.CurrentJournalContent);
-                UpdateSaveButtonState();
+                UpdateEditorText(_viewModel.CurrentJournalContent); // Update editor if changed externally
+                UpdateSaveButtonState(); // Content change might affect CanSave
                 break;
             case nameof(MainViewModel.IsLoadingContent):
                 UpdateEditorState(_viewModel.IsJournalSelected, _viewModel.IsLoadingContent);
                 break;
             case nameof(MainViewModel.IsSavingContent):
-                UpdateSaveButtonState();
+                UpdateSaveButtonState(); // Saving state affects CanSave
                 break;
             case nameof(MainViewModel.StatusBarText):
-                UpdateStatusBar(_viewModel.StatusBarText);
+                // Text binding handles this
+                // UpdateStatusBar(_viewModel.StatusBarText);
                 break;
             case nameof(MainViewModel.IsChangingPassword):
+                // Might disable parts of UI, handle if needed
                 break;
             case nameof(MainViewModel.ChangePasswordErrorMessage):
+                // Display error if needed, maybe in status bar or dialog
                 if (!string.IsNullOrEmpty(_viewModel.ChangePasswordErrorMessage))
                 {
+                    // Consider showing a message box or using status bar
+                    // UpdateStatusBar($"Password Change Error: {_viewModel.ChangePasswordErrorMessage}");
                 }
                 break;
         }
@@ -245,17 +304,19 @@ public sealed class MainView : UserControl
     {
         if (_viewModel == null || _isSyncingText) return;
 
+        // Update VM property manually (simulates TwoWay binding)
         _viewModel.CurrentJournalContent = _editorTextBox.Text;
     }
 
-    // Executes the VM command to show the date dialog
     private void NewButton_Click(object? sender, RoutedEventArgs e)
     {
+        // Execute command via stored reference
         _requestNewJournalDateCommand?.Execute(null);
     }
 
     private void SaveButton_Click(object? sender, RoutedEventArgs e)
     {
+        // Execute command via stored reference
         _saveJournalCommand?.Execute(null);
     }
 
@@ -263,10 +324,15 @@ public sealed class MainView : UserControl
     {
         if (_viewModel == null || _viewModel.OwnerWindow == null) return;
 
+        // Create the dialog's ViewModel first.
+        // The delegate passed here is a placeholder validation.
+        // The *actual* validation and execution happens in MainViewModel's ChangePasswordCommand.
         var dialogViewModel = new ChangePasswordDialogViewModel(async (oldPass, newPass) =>
         {
+            // This delegate isn't strictly needed anymore if ChangePasswordCommand handles everything.
             await Task.CompletedTask;
-            return true;
+            // Basic local check (e.g., non-empty) could be done here, but primary logic is in MainViewModel.
+            return !string.IsNullOrEmpty(oldPass) && !string.IsNullOrEmpty(newPass);
         });
 
         var dialog = new ChangePasswordDialog
@@ -274,54 +340,70 @@ public sealed class MainView : UserControl
             DataContext = dialogViewModel
         };
 
-        var dialogResult = await dialog.ShowDialog<bool>(_viewModel.OwnerWindow);
+        // Show the dialog and wait for it to close.
+        // The result isn't used directly here; we check IsConfirmed and VM properties.
+        await dialog.ShowDialog<object>(_viewModel.OwnerWindow); // Use object or bool?, doesn't matter much
 
-        if (dialogResult && dialog.IsConfirmed && _viewModel != null && dialogViewModel != null)
+        // After the dialog closes, check if the user confirmed *and* if the VM has the necessary data.
+        if (dialog.IsConfirmed && _viewModel != null && dialogViewModel != null)
         {
+            // Transfer the passwords entered in the dialog to the MainViewModel's properties.
             _viewModel.CurrentPasswordForChange = dialogViewModel.OldPassword;
             _viewModel.NewPassword = dialogViewModel.NewPassword;
             _viewModel.ConfirmNewPassword = dialogViewModel.ConfirmNewPassword;
 
+            // Check if the MainViewModel's ChangePasswordCommand can execute with the new data.
             if (_viewModel.ChangePasswordCommand.CanExecute(null))
             {
+                // Execute the command asynchronously.
                 _ = _viewModel.ChangePasswordCommand.ExecuteAsync(null);
             }
             else
             {
-                UpdateStatusBar("Could not initiate password change.");
+                // Provide feedback if the command cannot execute (e.g., validation failed in CanExecute).
+                UpdateStatusBar("Could not initiate password change (validation failed).");
+                // Optionally, clear the password fields in MainViewModel if desired after failure.
+                // _viewModel.CurrentPasswordForChange = null;
+                // _viewModel.NewPassword = null;
+                // _viewModel.ConfirmNewPassword = null;
             }
-        }
-    }
-
-    // Executes the VM command to show the export dialog
-    private void ExportJournalsMenuItem_Click(object? sender, RoutedEventArgs e)
-    {
-        if (_viewModel?.ShowExportDialogCommand.CanExecute(null) ?? false)
-        {
-            _ = _viewModel.ShowExportDialogCommand.ExecuteAsync(null); // Execute async command
         }
         else
         {
-            System.Diagnostics.Debug.WriteLine("Cannot execute ShowExportDialogCommand.");
-            // Optionally update status bar or show a message
-            // _viewModel?.UpdateStatusBar("Cannot open export dialog right now.");
+            // User cancelled or dialog VM missing, update status if needed.
+            UpdateStatusBar("Password change cancelled or aborted.");
         }
     }
+
+    // Commented out as Command binding is used now
+    // private void ExportJournalsMenuItem_Click(object? sender, RoutedEventArgs e)
+    // {
+    //     _showExportDialogCommand?.Execute(null);
+    // }
+
+    // private void SettingsMenuItem_Click(object? sender, RoutedEventArgs e)
+    // {
+    //     _showSettingsDialogCommand?.Execute(null);
+    // }
+
+
+    // No changes needed below this line for settings feature
+    // ... (UpdateJournalList, UpdateVisualSelection, etc.)
 
     private void UpdateJournalList(IEnumerable<JournalGroupViewModel>? groups)
     {
-        if (_currentlySelectedListBoxItem != null)
-        {
-            _currentlySelectedListBoxItem.IsSelected = false;
-            _currentlySelectedListBoxItem = null;
-        }
-        _journalListBox.ItemsSource = groups; // Still binding the top-level groups
+        // Replaced by ItemsSource binding in OnDataContextChangedHandler
+        // if (_currentlySelectedListBoxItem != null)
+        // {
+        //     _currentlySelectedListBoxItem.IsSelected = false;
+        //     _currentlySelectedListBoxItem = null;
+        // }
+        // _journalListBox.ItemsSource = groups;
     }
 
-    // Updated to handle nested Month Groups
+
     private void UpdateVisualSelection(JournalViewModel? newSelection)
     {
-        // Clear previous selection highlight if any
         if (_currentlySelectedListBoxItem != null)
         {
             _currentlySelectedListBoxItem.IsSelected = false;
@@ -330,63 +412,51 @@ public sealed class MainView : UserControl
 
         if (newSelection == null || _journalListBox.ItemsSource == null) return;
 
-        // Find the target ListBoxItem through the nested structure
         foreach (var yearGroup in _journalListBox.ItemsSource.OfType<JournalGroupViewModel>())
         {
             var yearGroupContainer = _journalListBox.ContainerFromItem(yearGroup) as Control;
             if (yearGroupContainer == null)
             {
-                // If container not realized, try scrolling the year group into view first
                 _journalListBox.ScrollIntoView(yearGroup);
-                // We might need to defer the rest of the search until UI updates
                 Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
-                return; // Exit for now, will retry after scroll
+                return;
             }
 
-            // Find the ItemsControl for MonthGroups within the YearGroup container
             var monthItemsControl = yearGroupContainer.FindDescendantOfType<ItemsControl>();
-            if (monthItemsControl == null) continue; // Should not happen with the template
+            if (monthItemsControl == null) continue;
 
-            // Find the specific MonthGroupViewModel that contains the newSelection
             var targetMonthGroup = yearGroup.MonthGroups.FirstOrDefault(mg => mg.Journals.Contains(newSelection));
-            if (targetMonthGroup == null) continue; // Journal not in this year group
+            if (targetMonthGroup == null) continue;
 
             var monthGroupContainer = monthItemsControl.ContainerFromItem(targetMonthGroup) as Control;
             if (monthGroupContainer == null)
             {
-                // If month container not realized, scroll month group into view
                 monthItemsControl.ScrollIntoView(targetMonthGroup);
                 Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
-                return; // Exit for now, will retry after scroll
+                return;
             }
 
-            // Find the ItemsControl for Journals within the MonthGroup container
             var journalItemsControl = monthGroupContainer.FindDescendantOfType<ItemsControl>();
-            if (journalItemsControl == null) continue; // Should not happen
+            if (journalItemsControl == null) continue;
 
-            // Find the final ListBoxItem for the JournalViewModel
             var journalItemContainer = journalItemsControl.ContainerFromItem(newSelection) as ListBoxItem;
             if (journalItemContainer != null)
             {
-                // Found it! Select and scroll.
                 journalItemContainer.IsSelected = true;
-                _currentlySelectedListBoxItem = journalItemContainer; // Track the selected item
+                _currentlySelectedListBoxItem = journalItemContainer;
 
-                // Scroll the main listbox to the year, then the inner controls
                 _journalListBox.ScrollIntoView(yearGroup);
                 monthItemsControl.ScrollIntoView(targetMonthGroup);
                 journalItemsControl.ScrollIntoView(newSelection);
 
-                // Ensure the final item is fully visible
                 Dispatcher.UIThread.Post(() => journalItemContainer.BringIntoView(), DispatcherPriority.Loaded);
-                return; // Found and selected, exit the loop
+                return;
             }
             else
             {
-                // If journal item container not realized yet, scroll it into view
                 journalItemsControl.ScrollIntoView(newSelection);
                 Dispatcher.UIThread.Post(() => UpdateVisualSelection(newSelection), DispatcherPriority.Background);
-                return; // Exit for now, will retry after scroll
+                return;
             }
         }
     }
@@ -413,159 +483,164 @@ public sealed class MainView : UserControl
 
     private void UpdateEditorState(bool isEnabled, bool isLoading)
     {
-        _editorTextBox.IsEnabled = isEnabled && !isLoading;
-        _editorTextBox.IsReadOnly = isLoading;
+        bool editorShouldBeEnabled = isEnabled && !isLoading;
+        if (_editorTextBox.IsEnabled != editorShouldBeEnabled)
+        {
+            _editorTextBox.IsEnabled = editorShouldBeEnabled;
+        }
+        // Make readonly if loading, but allow editing if just disabled (no selection)
+        if (_editorTextBox.IsReadOnly != isLoading)
+        {
+            _editorTextBox.IsReadOnly = isLoading;
+        }
     }
 
     private void UpdateStatusBar(string? text)
     {
-        _statusBarTextBlock.Text = text ?? string.Empty;
+        // Replaced by Text binding in OnDataContextChangedHandler
+        // _statusBarTextBlock.Text = text ?? string.Empty;
     }
 
-    // Update button state based on the correct command
     private void UpdateNewButtonState()
     {
+        // Check command CanExecute directly
         _newButton.IsEnabled = _requestNewJournalDateCommand?.CanExecute(null) ?? false;
     }
 
     private void UpdateSaveButtonState()
     {
         bool canSave = _saveJournalCommand?.CanExecute(null) ?? false;
+        // Ensure editor is also enabled (implies a selection is loaded and not currently loading/saving)
         _saveButton.IsEnabled = canSave && _editorTextBox.IsEnabled;
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnDetachedFromVisualTree(e);
+        // Clean up ViewModel subscriptions and references
         if (_viewModel != null)
         {
             _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
             _viewModel.OwnerWindow = null; // Clear owner on detach
+            _viewModel.Cleanup(); // Call VM cleanup
         }
         _viewModel = null;
         _requestNewJournalDateCommand = null;
         _saveJournalCommand = null;
-        _currentlySelectedListBoxItem = null;
+        _showExportDialogCommand = null;
+        _showSettingsDialogCommand = null;
+        _currentlySelectedListBoxItem = null; // Clear selection ref
     }
 
     private static IDataTemplate JournalDataTemplate()
     {
-        // Template for the top-level item (Year Group)
         return new FuncDataTemplate<JournalGroupViewModel>((yearVm, ns) =>
         {
-            // ItemsControl for the months within this year
             var monthItemsControl = new ItemsControl
             {
-                ItemsSource = yearVm.MonthGroups, // Bind to the collection of Month Groups
-                ItemTemplate = MonthGroupTemplate(), // Use the new template for months
-                Focusable = false // Don't let this steal focus
+                ItemsSource = yearVm.MonthGroups,
+                ItemTemplate = MonthGroupTemplate(),
+                Focusable = false
             };
 
-            return new StackPanel // Container for the year header and its months
+            return new StackPanel
             {
                 Spacing = 4,
-                Margin = new Thickness(5, 8, 5, 4), // Outer margin for the year group
+                Margin = new Thickness(5, 8, 5, 4),
                 Children =
                 {
-                    // Year Header Text
                     new TextBlock
                     {
-                        Text = yearVm.DisplayName, // Use DisplayName from JournalGroupViewModel
+                        [!TextBlock.TextProperty] = new Binding(nameof(yearVm.DisplayName)),
                         FontSize = 16,
                         FontWeight = FontWeight.Bold,
-                        Margin = new Thickness(0, 0, 0, 5), // Margin below year header
-                        IsEnabled = false, // Not interactive
+                        Margin = new Thickness(0, 0, 0, 5),
+                        IsEnabled = false,
                         Cursor = Cursor.Default
                     },
-                    // The list of months for this year
                     monthItemsControl
                 }
             };
-        }, supportsRecycling: true); // Enable recycling for performance
+        }, supportsRecycling: true);
     }
 
-    // New Template for the Month Group level
     private static IDataTemplate MonthGroupTemplate()
     {
         return new FuncDataTemplate<JournalMonthGroupViewModel>((monthVm, ns) =>
         {
-            // ItemsControl for the journals within this month
             var journalItemsControl = new ItemsControl
             {
-                ItemsSource = monthVm.Journals, // Bind to the collection of Journals
-                ItemTemplate = JournalItemTemplate(), // Use the existing template for journal entries
-                Focusable = false // Don't let this steal focus
+                ItemsSource = monthVm.Journals,
+                ItemTemplate = JournalItemTemplate(),
+                Focusable = false
             };
 
-            return new StackPanel // Container for the month header and its journals
+            return new StackPanel
             {
                 Spacing = 2,
-                Margin = new Thickness(15, 4, 5, 4), // Indent month groups slightly
+                Margin = new Thickness(15, 4, 5, 4),
                 Children =
                 {
-                    // Month Header Text
                     new TextBlock
                     {
-                        Text = monthVm.DisplayName, // Use DisplayName from JournalMonthGroupViewModel
+                         [!TextBlock.TextProperty] = new Binding(nameof(monthVm.DisplayName)),
                         FontSize = 13,
                         FontWeight = FontWeight.SemiBold,
-                        Margin = new Thickness(0, 0, 0, 3), // Margin below month header
-                        IsEnabled = false, // Not interactive
+                        Margin = new Thickness(0, 0, 0, 3),
+                        IsEnabled = false,
                         Cursor = Cursor.Default
                     },
-                    // The list of journals for this month
                     journalItemsControl
                 }
             };
-        }, supportsRecycling: true); // Enable recycling
+        }, supportsRecycling: true);
     }
 
 
-    // Template for the final Journal Entry item (leaf node)
     private static IDataTemplate JournalItemTemplate()
     {
-        // Defines how the JournalViewModel itself is displayed within the ListBoxItem
         var textBlockTemplate = new FuncDataTemplate<JournalViewModel>((vm, ns) =>
             new TextBlock
             {
-                [!TextBlock.TextProperty] = new Avalonia.Data.Binding(nameof(vm.DisplayName)), // Bind to DisplayName
+                [!TextBlock.TextProperty] = new Binding(nameof(vm.DisplayName)),
                 Padding = new Thickness(0),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center
             }, supportsRecycling: true);
 
-        // Creates the actual ListBoxItem container for the JournalViewModel
         return new FuncDataTemplate<JournalViewModel>((journalVm, ns) =>
         {
             var item = new ListBoxItem
             {
-                DataContext = journalVm, // Set DataContext for binding and event handlers
-                Content = journalVm, // Content to be displayed using ContentTemplate
-                ContentTemplate = textBlockTemplate, // Use the TextBlock template above
-                Padding = new Thickness(30, 3, 5, 3), // Indent journal items further under the month
+                DataContext = journalVm,
+                Content = journalVm,
+                ContentTemplate = textBlockTemplate,
+                Padding = new Thickness(30, 3, 5, 3),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center,
-                Cursor = new Cursor(StandardCursorType.Hand) // Indicate it's clickable
+                Cursor = new Cursor(StandardCursorType.Hand)
             };
-            // Attach event handler to detect clicks
             item.PointerPressed += JournalItem_PointerPressed;
             return item;
         },
-        supportsRecycling: true); // Enable recycling
+        supportsRecycling: true);
     }
 
     private static void JournalItem_PointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (sender is ListBoxItem { DataContext: JournalViewModel journalVm } item)
+        // Only handle primary button clicks to avoid context menu interference etc.
+        if (e.GetCurrentPoint(sender as Visual).Properties.IsLeftButtonPressed &&
+            sender is ListBoxItem { DataContext: JournalViewModel journalVm } item)
         {
             var mainView = item.FindAncestorOfType<MainView>();
             if (mainView?._viewModel != null)
             {
+                // Check reference equality before assigning to avoid unnecessary updates
                 if (!ReferenceEquals(mainView._viewModel.SelectedJournal, journalVm))
                 {
                     mainView._viewModel.SelectedJournal = journalVm;
                 }
-                e.Handled = true;
+                e.Handled = true; // Indicate the event was handled
             }
         }
     }

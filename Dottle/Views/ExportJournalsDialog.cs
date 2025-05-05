@@ -7,7 +7,8 @@ using Avalonia.Media;
 // using Avalonia.Data.Converters; // No longer needed directly here
 using System.Collections.Generic;
 using Dottle.ViewModels;
-using Dottle.Converters; // Add using for custom converters
+using Dottle.Converters;
+using Dottle.Models; // Add using for custom converters
 
 namespace Dottle.Views;
 
